@@ -1,0 +1,16 @@
+[package]
+name = "tdeckterm"
+version = "0.1.0"
+authors = ["Todd Stellanova <tstellanova@users-noreply.github.com>"]
+edition = "2021"
+license = "BSD3"
+
+[dependencies]
+hal = { package = "esp32s3-hal", version = "0.11.0" }
+esp-backtrace = { version = "0.7.0", features = ["esp32s3", "panic-handler", "exception-handler", "print-uart"] }
+esp-println       = { version = "0.5.0", features = ["esp32s3"] }
+#critical-section  = "1.1.2"
+mipidsi = "0.7.1"
+embedded-graphics = "0.8.1"
+display-interface = "0.4.1"
+display-interface-spi = "0.4.1"
