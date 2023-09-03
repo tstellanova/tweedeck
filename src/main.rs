@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-
+use core::fmt::Write;
 use esp_backtrace as _;
 use esp_println::println;
 use hal::{
@@ -18,7 +18,7 @@ use hal::{
     };
 
 use embedded_graphics::{
-    mono_font::{ascii::FONT_9X15_BOLD, MonoTextStyle},
+    mono_font::{ascii::FONT_9X15_BOLD, MonoTextStyleBuilder},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Rectangle, PrimitiveStyleBuilder},
@@ -34,8 +34,8 @@ use nb::block;
 // use embedded_graphics_framebuf::FrameBuf;
 
 // Display dimensions
-const DISPLAY_W: u32 = 320;
-const DISPLAY_H: u32 = 240;
+const DISPLAY_W: usize = 320;
+const DISPLAY_H: usize = 240;
 
 
 #[entry]
@@ -105,7 +105,7 @@ fn main() -> ! {
         .unwrap();
 
     // Clear the display initially
-    display.clear(Rgb565::BLUE).unwrap();
+    // display.clear(Rgb565::BLUE).unwrap();
 
     // Draw a box around the text area
     let box_style = PrimitiveStyleBuilder::new()
@@ -113,30 +113,46 @@ fn main() -> ! {
         .stroke_width(3)
         .fill_color(Rgb565::BLACK)
         .build();
-    Rectangle::new(Point::new(0,0),Size::new(DISPLAY_W,DISPLAY_H))
+    Rectangle::new(Point::new(0,0),Size::new(DISPLAY_W as u32,DISPLAY_H as u32))
         .into_styled(box_style)
         .draw(&mut display).unwrap();
 
-    println!("start text render");
+    // println!("start text render");
 
     let text_font = FONT_9X15_BOLD;
-    // let char_w = text_font.character_size.width as usize;
+    let char_w = text_font.character_size.width as usize;
     let char_h = text_font.character_size.height as usize;
-    let text_style = MonoTextStyle::new(&text_font, Rgb565::RED);
+    let max_x_index = DISPLAY_W / char_w; //expect 35?
+    let max_y_index = DISPLAY_H / char_h; // expect 15?
+    println!("max_x {} max_y {}", max_x_index, max_y_index);
+
+    // let text_style = MonoTextStyle::new(&text_font, Rgb565::RED);
+    let text_style = MonoTextStyleBuilder::new()
+        .font(&text_font)
+        .text_color(Rgb565::RED)
+        .background_color(Rgb565::BLACK)
+        .build();
+
     let text = "12345678901234567890123456789012345";
+    let mut x_char_index = 0;
+    let mut y_char_index = 0;
 
-    let mut line_count = 0;
-    // display.clear(Rgb565::RED).unwrap();
-    for text_y in (char_h..DISPLAY_H as usize).step_by(char_h) {
-        println!("text_y: {}", text_y);
-        let _ = Text::new(text, Point::new(0, text_y as i32), text_style)
-            .draw(&mut display)
-            .unwrap();
-        line_count += 1;
-    }
+    // let _ = Text::new(text, Point::new(0, text_y as i32), text_style)
+    //     .draw(&mut display)
+    //     .unwrap();
+    // text_y += char_h;
 
-    println!("done text render, lines: {}", line_count);
-
+    // let mut line_count = 0;
+    // // display.clear(Rgb565::RED).unwrap();
+    // for text_y in (char_h..DISPLAY_H as usize).step_by(char_h) {
+    //     println!("text_y: {}", text_y);
+    //     let _ = Text::new(text, Point::new(0, text_y as i32), text_style)
+    //         .draw(&mut display)
+    //         .unwrap();
+    //     line_count += 1;
+    // }
+    //
+    // println!("done text render, lines: {}", line_count);
 
 
     // let uart_config = Config {
@@ -161,26 +177,52 @@ fn main() -> ! {
 
     let mut serial_port = Uart::new(perphs.UART0, &mut system.peripheral_clock_control);
 
-    timer0.start(250u64.millis());
 
-    let sample_data:[u8;6] = [0x57,0x57,0x57,0x57,0x0D,0x0A];
-    serial_port.write_bytes(&sample_data).unwrap();
+    let _ = serial_port.write_str(&text);
+    // let sample_data:[u8;6] = [0x57,0x57,0x57,0x57,0x0D,0x0A];
+    // serial_port.write_bytes(&sample_data).unwrap();
+    let _ = writeln!(serial_port,"Yadda");
+    let _ = serial_port.flush();
+
+    timer0.start(250u64.millis());
 
     loop {
         let res = serial_port.read();
-
+        let mut str_bytes:[u8; 1] = [0];
         match res {
           Ok(rb) => {
-              println!("Read 0x{:02x}", rb);
-              //block!(serial_port.write(rb)).unwrap();
-              // block!(serial_port.flush()).unwrap();
+              println!("0x{:02x}", rb);
+              if 0x0d == rb {
+                  x_char_index = 0;
+                  y_char_index += 1;
+                  if y_char_index > max_y_index {
+                      y_char_index = 0;
+                  }
+                  continue;
+              }
+              str_bytes[0] = rb;
+              let _ = Text::new(core::str::from_utf8(&str_bytes).unwrap(),
+                                Point::new(
+                                    (x_char_index * char_w) as i32,
+                                    (y_char_index * char_h) as i32),
+                                text_style)
+                  .draw(&mut display)
+                  .unwrap();
+              x_char_index += 1;
+              if x_char_index > max_x_index {
+                  x_char_index = 0;
+                  y_char_index += 1;
+                  if y_char_index > max_y_index {
+                      y_char_index = 0;
+                  }
+              }
           },
           Err(_err) => {
               //println!("Error {:?}", err);
-              block!(timer0.wait()).unwrap();
+              // block!(timer0.wait()).unwrap();
           },
         }
-        //block!(timer0.wait()).unwrap();
+        block!(timer0.wait()).unwrap();
     }
 
 
