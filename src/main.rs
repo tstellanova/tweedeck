@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-extern crate display_interface_spi;
 
 use esp_backtrace as _;
 use esp_println::println;
@@ -9,18 +8,17 @@ use hal::{
     prelude::*,
     Delay,
     clock::ClockControl,
-    interrupt,
     IO,
-    peripherals::{Interrupt, Peripherals},
+    peripherals::{Peripherals},
     timer::TimerGroup,
     Rtc,
     spi::{Spi, SpiMode},
     Uart,
-    uart::{TxRxPins, config::*},
+    // uart::{TxRxPins, config::*},
     };
 
 use embedded_graphics::{
-    mono_font::{ascii::FONT_10X20, MonoTextStyle},
+    mono_font::{ascii::FONT_9X15_BOLD, MonoTextStyle},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Rectangle, PrimitiveStyleBuilder},
@@ -32,14 +30,8 @@ use display_interface_spi::SPIInterfaceNoCS;
 
 // Provides the Display builder
 use mipidsi::Builder;
-
-
 use nb::block;
-// use core::{cell::RefCell, fmt::Write};
-// use critical_section::Mutex;
-
-// static SERIAL: Mutex<RefCell<Option<Uart<hal::peripherals::UART0>>>> = Mutex::new(RefCell::new(None));
-
+// use embedded_graphics_framebuf::FrameBuf;
 
 // Display dimensions
 const DISPLAY_W: u32 = 320;
@@ -72,7 +64,8 @@ fn main() -> ! {
     rtc.rwdt.disable();
     wdt0.disable();
     wdt1.disable();
-    // println!("Hello world!");
+
+    println!("Start setup");
 
     let io = IO::new(perphs.GPIO, perphs.IO_MUX);
 
@@ -85,8 +78,7 @@ fn main() -> ! {
     let tdeck_tft_cs = io.pins.gpio12.into_push_pull_output();
     let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
     let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();
-
-    let tdeck_sdcard_cs = io.pins.gpio39;
+    let _tdeck_sdcard_cs = io.pins.gpio39;
 
     let  spi_tft = Spi::new(
         perphs.SPI2,
@@ -94,13 +86,11 @@ fn main() -> ! {
         tdeck_mosi,
         tdeck_miso,
         tdeck_tft_cs,
-        40u32.MHz(),
-        // 100u32.kHz(),
+        60u32.MHz(),
         SpiMode::Mode0,
         &mut system.peripheral_clock_control,
         &clocks,
     );
-
     tft_enable_pin.set_high().unwrap();
 
     // let di = SPIInterface::new(spi_tft, tdeck_tft_dc, tdeck_tft_cs);
@@ -110,38 +100,42 @@ fn main() -> ! {
         .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16,)
         .with_orientation(mipidsi::Orientation::Landscape(true))
         .with_invert_colors(mipidsi::ColorInversion::Inverted)
-        .with_framebuffer_size(400 as u16, 400 as u16,)
+        .with_framebuffer_size(400 as u16, 400 as u16,) //TODO tune
         .init(&mut delay, Some(tft_enable_pin))
         .unwrap();
 
     // Clear the display initially
     display.clear(Rgb565::BLUE).unwrap();
 
+    // Draw a box around the text area
     let box_style = PrimitiveStyleBuilder::new()
         .stroke_color(Rgb565::GREEN)
         .stroke_width(3)
         .fill_color(Rgb565::BLACK)
         .build();
-    Rectangle::new(Point::new(0,0),Size::new(320,240))
+    Rectangle::new(Point::new(0,0),Size::new(DISPLAY_W,DISPLAY_H))
         .into_styled(box_style)
         .draw(&mut display).unwrap();
 
-    let char_w = 10;
-    let char_h = 20;
-    let text_style = MonoTextStyle::new(&FONT_10X20, Rgb565::RED);
-    let text = "Hello World ^_^;";
-    let mut text_x = 10; //DISPLAY_W;
-    // let mut text_y = DISPLAY_H / 2;
+    println!("start text render");
 
-    // Alternating color
-    // let colors = [Rgb565::RED, Rgb565::GREEN, Rgb565::BLUE];
+    let text_font = FONT_9X15_BOLD;
+    // let char_w = text_font.character_size.width as usize;
+    let char_h = text_font.character_size.height as usize;
+    let text_style = MonoTextStyle::new(&text_font, Rgb565::RED);
+    let text = "12345678901234567890123456789012345";
 
+    let mut line_count = 0;
     // display.clear(Rgb565::RED).unwrap();
-    for text_y in (20..DISPLAY_H).step_by(char_h) {
-        let _ = Text::new(text, Point::new(text_x, text_y as i32), text_style)
+    for text_y in (char_h..DISPLAY_H as usize).step_by(char_h) {
+        println!("text_y: {}", text_y);
+        let _ = Text::new(text, Point::new(0, text_y as i32), text_style)
             .draw(&mut display)
             .unwrap();
+        line_count += 1;
     }
+
+    println!("done text render, lines: {}", line_count);
 
 
 
@@ -167,7 +161,6 @@ fn main() -> ! {
 
     let mut serial_port = Uart::new(perphs.UART0, &mut system.peripheral_clock_control);
 
-    println!("Start");
     timer0.start(250u64.millis());
 
     let sample_data:[u8;6] = [0x57,0x57,0x57,0x57,0x0D,0x0A];
