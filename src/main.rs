@@ -2,6 +2,7 @@
 #![no_main]
 
 use core::fmt::Write;
+
 use esp_backtrace as _;
 use esp_println::println;
 use hal::{
@@ -14,7 +15,7 @@ use hal::{
     Rtc,
     spi::{Spi, SpiMode},
     Uart,
-    // uart::{TxRxPins, config::*},
+    uart::{TxRxPins, config::*},
     };
 
 use embedded_graphics::{
@@ -155,73 +156,88 @@ fn main() -> ! {
     // println!("done text render, lines: {}", line_count);
 
 
-    // let uart_config = Config {
-    //     baudrate: 115200,
-    //     data_bits: DataBits::DataBits8,
-    //     parity: Parity::ParityNone,
-    //     stop_bits: StopBits::STOP1,
-    // };
-    //
-    // let uart_pins = TxRxPins::new_tx_rx(
-    //     io.pins.gpio47.into_push_pull_output(),
-    //     io.pins.gpio48.into_floating_input(),
-    //     );
-    //
-    // let mut serial_port = Uart::new_with_config(
-    //     perphs.UART0,
-    //     Some(uart_config),
-    //     Some(uart_pins),
-    //     &clocks,
-    //     &mut system.peripheral_clock_control,
-    //     );
+    let uart_config = Config {
+        baudrate: 115200,
+        data_bits: DataBits::DataBits8,
+        parity: Parity::ParityNone,
+        stop_bits: StopBits::STOP1,
+    };
 
-    let mut serial_port = Uart::new(perphs.UART0, &mut system.peripheral_clock_control);
+    let uart_pins = TxRxPins::new_tx_rx(
+        io.pins.gpio43.into_push_pull_output(), //43 U0TXD
+        io.pins.gpio44.into_floating_input(), // 44 U0RXD
+        );
 
+    let mut serial_port = Uart::new_with_config(
+        perphs.UART0,
+        Some(uart_config),
+        Some(uart_pins),
+        &clocks,
+        &mut system.peripheral_clock_control,
+        );
 
+    // let mut serial_port = Uart::new(perphs.UART0, &mut system.peripheral_clock_control);
     let _ = serial_port.write_str(&text);
-    // let sample_data:[u8;6] = [0x57,0x57,0x57,0x57,0x0D,0x0A];
-    // serial_port.write_bytes(&sample_data).unwrap();
-    let _ = writeln!(serial_port,"Yadda");
     let _ = serial_port.flush();
 
-    timer0.start(250u64.millis());
-
+    timer0.start(100u64.millis());
     loop {
+        let mut rbuf:[u8; 120] = [0; 120];
+        let mut ridx:usize = 0;
         let res = serial_port.read();
-        let mut str_bytes:[u8; 1] = [0];
         match res {
-          Ok(rb) => {
-              println!("0x{:02x}", rb);
-              if 0x0d == rb {
-                  x_char_index = 0;
-                  y_char_index += 1;
-                  if y_char_index > max_y_index {
-                      y_char_index = 0;
-                  }
-                  continue;
-              }
-              str_bytes[0] = rb;
-              let _ = Text::new(core::str::from_utf8(&str_bytes).unwrap(),
-                                Point::new(
-                                    (x_char_index * char_w) as i32,
-                                    (y_char_index * char_h) as i32),
-                                text_style)
-                  .draw(&mut display)
-                  .unwrap();
-              x_char_index += 1;
-              if x_char_index > max_x_index {
-                  x_char_index = 0;
-                  y_char_index += 1;
-                  if y_char_index > max_y_index {
-                      y_char_index = 0;
-                  }
-              }
-          },
-          Err(_err) => {
-              //println!("Error {:?}", err);
-              // block!(timer0.wait()).unwrap();
-          },
+            Ok(rb) => {
+                rbuf[ridx] = rb;
+                ridx += 1;
+                // continue 'rcv_loop;
+            },
+            Err(_err) => {
+                // break;
+            }
         }
+
+
+        if ridx > 0 {
+            println!("ridx: {}", ridx);
+
+            let subset = &rbuf[0..ridx];
+            //let _ = serial_port.write_bytes(&subset);
+            let eol = rbuf[ridx-1] == 0x0d;
+            // if eol {
+            //     x_char_index = 0;
+            //     y_char_index += 1;
+            //     if y_char_index > max_y_index {
+            //         y_char_index = 0;
+            //     }
+            //     continue;
+            // }
+            let _ = Text::new(core::str::from_utf8(&subset).unwrap(),
+                              Point::new(
+                                  (x_char_index * char_w) as i32,
+                                  (y_char_index * char_h) as i32),
+                              text_style)
+                .draw(&mut display)
+                .unwrap();
+
+            x_char_index += ridx;
+            if x_char_index > max_x_index {
+                x_char_index = 0;
+                y_char_index += 1;
+                if y_char_index > max_y_index {
+                    y_char_index = 0;
+                }
+            }
+            else if eol {
+                y_char_index += 1;
+                if y_char_index > max_y_index {
+                    y_char_index = 0;
+                }
+            }
+
+        }
+        // else {
+        //     block!(timer0.wait()).unwrap();
+        // }
         block!(timer0.wait()).unwrap();
     }
 
