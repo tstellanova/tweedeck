@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate embedded_graphics;
+
 use core::fmt::Write;
 
 use esp_backtrace as _;
@@ -22,11 +24,11 @@ use hal::{
     };
 
 use embedded_graphics::{
-    mono_font::{ascii::FONT_9X15_BOLD, MonoTextStyleBuilder},
+    mono_font::{ascii::FONT_9X15_BOLD, MonoFont, MonoTextStyle, MonoTextStyleBuilder},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Rectangle, PrimitiveStyleBuilder},
-    text::Text,
+    text::{Text, TextStyle},
 };
 
 // Provides the parallel port and display interface builders
@@ -34,6 +36,7 @@ use display_interface_spi::SPIInterfaceNoCS;
 
 // Provides the Display builder
 use mipidsi::Builder;
+use mipidsi::Display;
 use nb::block;
 // use embedded_graphics_framebuf::FrameBuf;
 use sx126x::conf::Config as LoRaConfig;
@@ -49,6 +52,32 @@ const DISPLAY_H: usize = 240;
 // i2c bus address of T-Deck keyboard (run by a separate microcontroller)
 const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
 
+const TEXT_FONT: MonoFont = FONT_9X15_BOLD;
+const CHAR_W: usize = TEXT_FONT.character_size.width as usize;
+const CHAR_H: usize = TEXT_FONT.character_size.height as usize;
+const MAX_X_INDEX: usize = DISPLAY_W / CHAR_W; //expect 35?
+const MAX_Y_INDEX:usize = DISPLAY_H / CHAR_H; // expect 15?
+
+
+fn update_cursor_position( x_idx: &mut usize, y_idx: &mut usize, eol: bool,) {
+    if eol {
+        *y_idx += 1;
+        *x_idx = 0;
+        if *y_idx > MAX_Y_INDEX {
+            *y_idx = 0;
+        }
+    }
+    else {
+        *x_idx += 1;
+        if *x_idx > MAX_X_INDEX {
+            *x_idx = 0;
+            *y_idx += 1;
+            if *y_idx > MAX_Y_INDEX {
+                *y_idx = 0;
+            }
+        }
+    }
+}
 
 #[entry]
 fn main() -> ! {
@@ -148,16 +177,12 @@ fn main() -> ! {
 
     // println!("start text render");
 
-    let text_font = FONT_9X15_BOLD;
-    let char_w = text_font.character_size.width as usize;
-    let char_h = text_font.character_size.height as usize;
-    let max_x_index = DISPLAY_W / char_w; //expect 35?
-    let max_y_index = DISPLAY_H / char_h; // expect 15?
-    println!("max_x {} max_y {}", max_x_index, max_y_index);
+
+    println!("max_x {} max_y {}", MAX_X_INDEX, MAX_Y_INDEX);
 
     // let text_style = MonoTextStyle::new(&text_font, Rgb565::RED);
     let text_style = MonoTextStyleBuilder::new()
-        .font(&text_font)
+        .font(&TEXT_FONT)
         .text_color(Rgb565::RED)
         .background_color(Rgb565::BLACK)
         .build();
@@ -222,41 +247,27 @@ fn main() -> ! {
             }
         }
 
-
-
         if read_count > 0 {
             let _ = serial_port.write_bytes(&rbuf);
             let eol = rbuf[0] == 0x0d;
-
-            let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
-                              Point::new(
-                                  (x_char_index * char_w) as i32,
-                                  (y_char_index * char_h) as i32),
-                              text_style)
-                .draw(&mut display)
-                .unwrap();
 
             if eol {
                 //tack on a linefeed
                 rbuf[0] = 0x0a;
                 let _ = serial_port.write_bytes(&rbuf);
+            }
 
-                y_char_index += 1;
-                x_char_index = 0;
-                if y_char_index > max_y_index {
-                    y_char_index = 0;
-                }
-            }
-            else {
-                x_char_index += read_count;
-                if x_char_index > max_x_index {
-                    x_char_index = 0;
-                    y_char_index += 1;
-                    if y_char_index > max_y_index {
-                        y_char_index = 0;
-                    }
-                }
-            }
+            let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
+                              Point::new(
+                                  (x_char_index * CHAR_W) as i32,
+                                  (y_char_index * CHAR_H) as i32),
+                              text_style)
+                .draw(&mut display)
+                .unwrap();
+            update_cursor_position(&mut x_char_index, &mut y_char_index, eol);
+
+
+
         }
         else {
             //read from the T-Keyboard via i2c
@@ -265,7 +276,17 @@ fn main() -> ! {
             match kb_res {
                 Ok(..) => {
                     if 0 != rbuf[0] {
-                        println!("\r\n0x{:02x}",rbuf[0]);
+                        //println!("\r\n0x{:02x}",rbuf[0]);
+                        let eol = rbuf[0] == 0x0d;
+
+                        let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
+                                          Point::new(
+                                              (x_char_index * CHAR_W) as i32,
+                                              (y_char_index * CHAR_H) as i32),
+                                          text_style)
+                            .draw(&mut display)
+                            .unwrap();
+                        update_cursor_position(&mut x_char_index, &mut y_char_index, eol);
                     }
                 },
                 Err(_err) => {
