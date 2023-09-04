@@ -33,6 +33,11 @@ use display_interface_spi::SPIInterfaceNoCS;
 use mipidsi::Builder;
 use nb::block;
 // use embedded_graphics_framebuf::FrameBuf;
+use sx126x::conf::Config as LoRaConfig;
+use sx126x::SX126x;
+
+// LoRA constants
+const LORA_RF_FREQUENCY: u32 = 433_000_000; // 433MHz
 
 // Display dimensions
 const DISPLAY_W: usize = 320;
@@ -134,7 +139,7 @@ fn main() -> ! {
         .background_color(Rgb565::BLACK)
         .build();
 
-    let text = "12345678901234567890123456789012345";
+    let text = "12345678901234567890123456789012345\r\n";
     let mut x_char_index = 0;
     let mut y_char_index = 0;
 
@@ -182,36 +187,23 @@ fn main() -> ! {
 
     timer0.start(100u64.millis());
     loop {
-        let mut rbuf:[u8; 120] = [0; 120];
-        let mut ridx:usize = 0;
+        let mut rbuf:[u8;1] = [0u8];
+        let mut read_count = 0;
         let res = serial_port.read();
         match res {
             Ok(rb) => {
-                rbuf[ridx] = rb;
-                ridx += 1;
-                // continue 'rcv_loop;
+                rbuf[0] = rb;
+                read_count += 1;
             },
             Err(_err) => {
-                // break;
             }
         }
 
+        if read_count > 0 {
+            let _ = serial_port.write_bytes(&rbuf);
+            let eol = rbuf[0] == 0x0d;
 
-        if ridx > 0 {
-            println!("ridx: {}", ridx);
-
-            let subset = &rbuf[0..ridx];
-            //let _ = serial_port.write_bytes(&subset);
-            let eol = rbuf[ridx-1] == 0x0d;
-            // if eol {
-            //     x_char_index = 0;
-            //     y_char_index += 1;
-            //     if y_char_index > max_y_index {
-            //         y_char_index = 0;
-            //     }
-            //     continue;
-            // }
-            let _ = Text::new(core::str::from_utf8(&subset).unwrap(),
+            let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
                               Point::new(
                                   (x_char_index * char_w) as i32,
                                   (y_char_index * char_h) as i32),
@@ -219,26 +211,32 @@ fn main() -> ! {
                 .draw(&mut display)
                 .unwrap();
 
-            x_char_index += ridx;
-            if x_char_index > max_x_index {
-                x_char_index = 0;
-                y_char_index += 1;
-                if y_char_index > max_y_index {
-                    y_char_index = 0;
-                }
-            }
-            else if eol {
-                y_char_index += 1;
-                if y_char_index > max_y_index {
-                    y_char_index = 0;
-                }
-            }
+            if eol {
+                //tack on a linefeed
+                rbuf[0] = 0x0a;
+                let _ = serial_port.write_bytes(&rbuf);
 
+                y_char_index += 1;
+                x_char_index = 0;
+                if y_char_index > max_y_index {
+                    y_char_index = 0;
+                }
+            }
+            else {
+                x_char_index += read_count;
+                if x_char_index > max_x_index {
+                    x_char_index = 0;
+                    y_char_index += 1;
+                    if y_char_index > max_y_index {
+                        y_char_index = 0;
+                    }
+                }
+            }
         }
-        // else {
-        //     block!(timer0.wait()).unwrap();
-        // }
-        block!(timer0.wait()).unwrap();
+        else {
+            block!(timer0.wait()).unwrap();
+        }
+
     }
 
 
