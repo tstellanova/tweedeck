@@ -187,6 +187,13 @@ fn main() -> ! {
         .background_color(Rgb565::BLACK)
         .build();
 
+    let kb_text_style = MonoTextStyleBuilder::new()
+        .font(&TEXT_FONT)
+        .text_color(Rgb565::GREEN)
+        .background_color(Rgb565::BLACK)
+        .build();
+
+
     let text = "12345678901234567890123456789012345\r\n";
     let mut x_char_index = 0;
     let mut y_char_index = 0;
@@ -283,7 +290,7 @@ fn main() -> ! {
                                           Point::new(
                                               (x_char_index * CHAR_W) as i32,
                                               (y_char_index * CHAR_H) as i32),
-                                          text_style)
+                                          kb_text_style)
                             .draw(&mut display)
                             .unwrap();
                         update_cursor_position(&mut x_char_index, &mut y_char_index, eol);
