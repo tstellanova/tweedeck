@@ -1,3 +1,12 @@
+/**
+Copyright (c) 2023 Todd Stellanova. All rights reserved.
+LICENSE: BSD3 (See LICENSE file)
+
+
+Bare metal application for using the Lilygo T-Deck
+
+*/
+
 #![no_std]
 #![no_main]
 
@@ -34,7 +43,6 @@ use display_interface_spi::SPIInterfaceNoCS;
 
 // Provides the Display builder
 use mipidsi::{Builder, Display};
-// use embedded_graphics_framebuf::FrameBuf;
 
 // LoRa info
 use sx126x::conf::Config as LoRaConfig;
@@ -71,7 +79,7 @@ const MAX_OUT_Y_IDX:u32 = (OUT_VIEW_SIZE.height / OUT_CHAR_H)-1; // expect 10?
 const MAX_IN_X_IDX:u32 = (IN_VIEW_SIZE.width / IN_CHAR_W) -1; //expect 35?
 const MAX_IN_Y_IDX:u32 = (IN_VIEW_SIZE.height / IN_CHAR_H)-1; // expect 2?
 
-// Rules for how to move the cursor position based on a single character input
+// Rules for how to update the cursor position based on a single character input
 fn update_cursor_position( x_idx: &mut u32, y_idx: &mut u32, max_x_idx: u32, max_y_idx: u32, eol: bool,) {
     if eol {
         *y_idx += 1;
