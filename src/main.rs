@@ -4,6 +4,7 @@
 extern crate embedded_graphics;
 
 use core::fmt::Write;
+use nb::block;
 
 use esp_backtrace as _;
 use esp_println::println;
@@ -35,44 +36,55 @@ use embedded_graphics::{
 use display_interface_spi::SPIInterfaceNoCS;
 
 // Provides the Display builder
-use mipidsi::Builder;
-use mipidsi::Display;
-use nb::block;
+use mipidsi::{Builder, Display};
 // use embedded_graphics_framebuf::FrameBuf;
+
+// LoRa info
 use sx126x::conf::Config as LoRaConfig;
 use sx126x::SX126x;
 
-// LoRA constants
+// LoRa constants
 const LORA_RF_FREQUENCY: u32 = 433_000_000; // 433MHz
 
 // Display dimensions
 const DISPLAY_W: usize = 320;
 const DISPLAY_H: usize = 240;
 
-// i2c bus address of T-Deck keyboard (run by a separate microcontroller)
+const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
+const OUTPUT_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, (DISPLAY_SIZE.height*2)/3);
+const INPUT_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, DISPLAY_SIZE.height/3);
+const OUTPUT_VIEW_TOP_LEFT: Point = Point::new(0,0);
+const INPUT_VIEW_TOP_LEFT: Point = Point::new(0, OUTPUT_VIEW_SIZE.height as i32);
+
+// i2c bus address of T-Deck "T-Keyboard" (run by a separate microcontroller -- ESP32-C3)
 const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
 
-const TEXT_FONT: MonoFont = FONT_9X15_BOLD;
-const CHAR_W: usize = TEXT_FONT.character_size.width as usize;
-const CHAR_H: usize = TEXT_FONT.character_size.height as usize;
-const MAX_X_INDEX: usize = DISPLAY_W / CHAR_W; //expect 35?
-const MAX_Y_INDEX:usize = DISPLAY_H / CHAR_H; // expect 15?
+const INPUT_TEXT_FONT: MonoFont = FONT_9X15_BOLD;
+const OUTPUT_TEXT_FONT: MonoFont = FONT_9X15_BOLD;
+const OUT_CHAR_W:u32 = OUTPUT_TEXT_FONT.character_size.width as u32;
+const OUT_CHAR_H:u32 = OUTPUT_TEXT_FONT.character_size.height as u32;
+const IN_CHAR_W:u32 = INPUT_TEXT_FONT.character_size.width as u32;
+const IN_CHAR_H:u32 = INPUT_TEXT_FONT.character_size.height as u32;
+const MAX_OUT_X_IDX: u32 = OUTPUT_VIEW_SIZE.width / OUT_CHAR_W; //expect 35?
+const MAX_OUT_Y_IDX:u32 = OUTPUT_VIEW_SIZE.height / OUT_CHAR_H; // expect 10?
+const MAX_IN_X_IDX:u32 = INPUT_VIEW_SIZE.width / IN_CHAR_W; //expect 35?
+const MAX_IN_Y_IDX:u32 = INPUT_VIEW_SIZE.height / IN_CHAR_H; // expect 2?
 
-
-fn update_cursor_position( x_idx: &mut usize, y_idx: &mut usize, eol: bool,) {
+// Rules for how to move the cursor position based on a single character input
+fn update_cursor_position( x_idx: &mut u32, y_idx: &mut u32, max_x_idx: u32, max_y_idx: u32, eol: bool,) {
     if eol {
         *y_idx += 1;
         *x_idx = 0;
-        if *y_idx > MAX_Y_INDEX {
+        if *y_idx > max_y_idx {
             *y_idx = 0;
         }
     }
     else {
         *x_idx += 1;
-        if *x_idx > MAX_X_INDEX {
+        if *x_idx > max_x_idx {
             *x_idx = 0;
             *y_idx += 1;
-            if *y_idx > MAX_Y_INDEX {
+            if *y_idx > max_y_idx {
                 *y_idx = 0;
             }
         }
@@ -117,8 +129,8 @@ fn main() -> ! {
     #define BOARD_I2C_SDA       18
 #define BOARD_I2C_SCL       8
      */
-    // Setup 100 kHz i2c bus
-    let mut bus_i2c = I2C::new(
+    // Setup 100 kHz i2c0 bus
+    let mut i2c0_bus = I2C::new(
         perphs.I2C0,
         io.pins.gpio18,
         io.pins.gpio8,
@@ -138,7 +150,7 @@ fn main() -> ! {
     let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();
     let _tdeck_sdcard_cs = io.pins.gpio39;
 
-    let  spi_tft = Spi::new(
+    let spi2_bus = Spi::new(
         perphs.SPI2,
         tdeck_sclk,
         tdeck_mosi,
@@ -152,7 +164,7 @@ fn main() -> ! {
     tft_enable_pin.set_high().unwrap();
 
     // let di = SPIInterface::new(spi_tft, tdeck_tft_dc, tdeck_tft_cs);
-    let di = SPIInterfaceNoCS::new(spi_tft, tdeck_tft_dc);
+    let di = SPIInterfaceNoCS::new(spi2_bus, tdeck_tft_dc);
     let mut delay = Delay::new(&clocks);
     let mut display = Builder::st7789(di)
         .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16,)
@@ -165,56 +177,58 @@ fn main() -> ! {
     // Clear the display initially
     // display.clear(Rgb565::BLUE).unwrap();
 
-    // Draw a box around the text area
+    // Draw a box around the total display  area
     let box_style = PrimitiveStyleBuilder::new()
-        .stroke_color(Rgb565::GREEN)
-        .stroke_width(3)
+        .stroke_color(Rgb565::YELLOW)
+        .stroke_width(1)
         .fill_color(Rgb565::BLACK)
         .build();
     Rectangle::new(Point::new(0,0),Size::new(DISPLAY_W as u32,DISPLAY_H as u32))
         .into_styled(box_style)
         .draw(&mut display).unwrap();
+    // Draw a box around the output view
+    let output_view_box_style = PrimitiveStyleBuilder::new()
+        .stroke_color(Rgb565::CYAN)
+        .stroke_width(1)
+        .fill_color(Rgb565::BLACK)
+        .build();
+    Rectangle::new(OUTPUT_VIEW_TOP_LEFT,OUTPUT_VIEW_SIZE)
+        .into_styled(output_view_box_style)
+        .draw(&mut display).unwrap();
+    // Draw a box around the input view
+    let input_view_box_style = PrimitiveStyleBuilder::new()
+        .stroke_color(Rgb565::MAGENTA)
+        .stroke_width(1)
+        .fill_color(Rgb565::BLACK)
+        .build();
+    Rectangle::new(INPUT_VIEW_TOP_LEFT,INPUT_VIEW_SIZE)
+        .into_styled(input_view_box_style)
+        .draw(&mut display).unwrap();
 
     // println!("start text render");
 
 
-    println!("max_x {} max_y {}", MAX_X_INDEX, MAX_Y_INDEX);
+    println!("max_x {} max_y {}", MAX_OUT_X_IDX, MAX_OUT_Y_IDX);
 
-    // let text_style = MonoTextStyle::new(&text_font, Rgb565::RED);
-    let text_style = MonoTextStyleBuilder::new()
-        .font(&TEXT_FONT)
+    // let text_style = MonoTextStyle::new(&text_font, Rgb565::RED);// no bg fill
+    let output_text_style = MonoTextStyleBuilder::new()
+        .font(&OUTPUT_TEXT_FONT)
         .text_color(Rgb565::RED)
-        .background_color(Rgb565::BLACK)
+        .background_color(Rgb565::BLACK) //fill with black
         .build();
 
     let kb_text_style = MonoTextStyleBuilder::new()
-        .font(&TEXT_FONT)
+        .font(&OUTPUT_TEXT_FONT)
         .text_color(Rgb565::GREEN)
         .background_color(Rgb565::BLACK)
         .build();
 
 
     let text = "12345678901234567890123456789012345\r\n";
-    let mut x_char_index = 0;
-    let mut y_char_index = 0;
-
-    // let _ = Text::new(text, Point::new(0, text_y as i32), text_style)
-    //     .draw(&mut display)
-    //     .unwrap();
-    // text_y += char_h;
-
-    // let mut line_count = 0;
-    // // display.clear(Rgb565::RED).unwrap();
-    // for text_y in (char_h..DISPLAY_H as usize).step_by(char_h) {
-    //     println!("text_y: {}", text_y);
-    //     let _ = Text::new(text, Point::new(0, text_y as i32), text_style)
-    //         .draw(&mut display)
-    //         .unwrap();
-    //     line_count += 1;
-    // }
-    //
-    // println!("done text render, lines: {}", line_count);
-
+    let mut output_x_idx: u32 = 0;
+    let mut output_y_idx: u32 = 0;
+    let mut input_x_idx: u32 = 0;
+    let mut input_y_idx: u32 = 0;
 
     let uart_config = Config {
         baudrate: 115200,
@@ -224,8 +238,8 @@ fn main() -> ! {
     };
 
     let uart_pins = TxRxPins::new_tx_rx(
-        io.pins.gpio43.into_push_pull_output(), //43 U0TXD
-        io.pins.gpio44.into_floating_input(), // 44 U0RXD
+        io.pins.gpio43.into_push_pull_output(), //GPIO 43 U0TXD
+        io.pins.gpio44.into_floating_input(), //GPIO 44 U0RXD
         );
 
     let mut serial_port = Uart::new_with_config(
@@ -236,64 +250,61 @@ fn main() -> ! {
         &mut system.peripheral_clock_control,
         );
 
-    // let mut serial_port = Uart::new(perphs.UART0, &mut system.peripheral_clock_control);
-    let _ = serial_port.write_str(&text);
-    let _ = serial_port.flush();
+    // let _ = serial_port.write_str(&text);
+    // let _ = serial_port.flush();
 
     timer0.start(100u64.millis());
     loop {
         let mut rbuf:[u8;1] = [0u8];
-        let mut read_count = 0;
-        let res = serial_port.read();
-        match res {
-            Ok(rb) => {
+
+        // read from the serial port and display
+        {
+            // let mut read_count = 0;
+            if let Ok(rb) = serial_port.read() {
+                let eol = ( rb == 0x0d);
                 rbuf[0] = rb;
-                read_count += 1;
-            },
-            Err(_err) => {
-            }
-        }
-
-        if read_count > 0 {
-            let _ = serial_port.write_bytes(&rbuf);
-            let eol = rbuf[0] == 0x0d;
-
-            if eol {
-                //tack on a linefeed
-                rbuf[0] = 0x0a;
+                // TODO disable echo -- used for debugging purposes only
                 let _ = serial_port.write_bytes(&rbuf);
+                if eol {
+                    //tack on a linefeed
+                    rbuf[0] = 0x0a;
+                    let _ = serial_port.write_bytes(&rbuf);
+                }
+
+                let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
+                                  Point::new(
+                                      OUTPUT_VIEW_TOP_LEFT.x + (output_x_idx * OUT_CHAR_W) as i32,
+                                      OUTPUT_VIEW_TOP_LEFT.y + (output_y_idx * OUT_CHAR_H) as i32),
+                                  output_text_style)
+                    .draw(&mut display)
+                    .unwrap();
+                update_cursor_position(&mut output_x_idx, &mut output_y_idx, MAX_OUT_X_IDX, MAX_OUT_Y_IDX, eol);
             }
-
-            let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
-                              Point::new(
-                                  (x_char_index * CHAR_W) as i32,
-                                  (y_char_index * CHAR_H) as i32),
-                              text_style)
-                .draw(&mut display)
-                .unwrap();
-            update_cursor_position(&mut x_char_index, &mut y_char_index, eol);
-
-
-
         }
-        else {
-            //read from the T-Keyboard via i2c
+
+        //read from the T-Keyboard via i2c
+        {
             let mut rbuf = [0u8;1];
-            let kb_res = bus_i2c.read(LILYGO_KB_I2C_ADDRESS, &mut rbuf);
+            let kb_res = i2c0_bus.read(LILYGO_KB_I2C_ADDRESS, &mut rbuf);
             match kb_res {
                 Ok(..) => {
                     if 0 != rbuf[0] {
                         //println!("\r\n0x{:02x}",rbuf[0]);
                         let eol = rbuf[0] == 0x0d;
-
                         let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
                                           Point::new(
-                                              (x_char_index * CHAR_W) as i32,
-                                              (y_char_index * CHAR_H) as i32),
+                                              INPUT_VIEW_TOP_LEFT.x + (input_x_idx * OUT_CHAR_W) as i32,
+                                              INPUT_VIEW_TOP_LEFT.y + (input_y_idx * OUT_CHAR_H) as i32),
                                           kb_text_style)
                             .draw(&mut display)
                             .unwrap();
-                        update_cursor_position(&mut x_char_index, &mut y_char_index, eol);
+                        update_cursor_position(&mut input_x_idx, &mut input_y_idx, MAX_IN_X_IDX, MAX_IN_Y_IDX, eol);
+                        let _ = serial_port.write_bytes(&rbuf);
+                        if eol {
+                            //tack on a linefeed
+                            rbuf[0] = 0x0a;
+                            let _ = serial_port.write_bytes(&rbuf);
+                        }
                     }
                 },
                 Err(_err) => {
@@ -301,9 +312,8 @@ fn main() -> ! {
                 }
 
             }
-
-            block!(timer0.wait()).unwrap();
         }
+        block!(timer0.wait()).unwrap();
 
 
 
