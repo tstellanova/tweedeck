@@ -139,10 +139,6 @@ fn main() -> ! {
         &clocks,
     );
 
-
-    // let tdeck_sclk = io.pins.gpio40;
-    // let tdeck_miso = io.pins.gpio38;
-    // let tdeck_mosi = io.pins.gpio41;
     let tdeck_tft_cs = io.pins.gpio12.into_push_pull_output();
     let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
     let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();
@@ -168,12 +164,9 @@ fn main() -> ! {
         .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16,)
         .with_orientation(mipidsi::Orientation::Landscape(true))
         .with_invert_colors(mipidsi::ColorInversion::Inverted)
-        .with_framebuffer_size(400 as u16, 400 as u16,) //TODO tune
+        .with_framebuffer_size(DISPLAY_H as u16, DISPLAY_W as u16,) //TODO remember this is rotated
         .init(&mut delay, Some(tft_enable_pin))
         .unwrap();
-
-    // Clear the display initially
-    // display.clear(Rgb565::BLUE).unwrap();
 
     // Draw a box around the total display  area
     let box_style = PrimitiveStyleBuilder::new()
@@ -252,7 +245,7 @@ fn main() -> ! {
         {
             // let mut read_count = 0;
             if let Ok(rb) = uart0.read() {
-                let eol = ( rb == 0x0d);
+                let eol =  rb == 0x0d;
                 rbuf[0] = rb;
                 // TODO disable echo -- used for debugging purposes only
                 let _ = uart0.write_bytes(&rbuf);
