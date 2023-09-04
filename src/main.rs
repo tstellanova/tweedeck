@@ -9,8 +9,11 @@ use hal::{
     prelude::*,
     Delay,
     clock::ClockControl,
+    i2c::I2C,
+
     IO,
-    peripherals::{Peripherals},
+    peripherals::Peripherals,
+
     timer::TimerGroup,
     Rtc,
     spi::{Spi, SpiMode},
@@ -42,6 +45,9 @@ const LORA_RF_FREQUENCY: u32 = 433_000_000; // 433MHz
 // Display dimensions
 const DISPLAY_W: usize = 320;
 const DISPLAY_H: usize = 240;
+
+// i2c bus address of T-Deck keyboard (run by a separate microcontroller)
+const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
 
 
 #[entry]
@@ -77,6 +83,23 @@ fn main() -> ! {
 
     let mut board_periph_pin = io.pins.gpio10.into_push_pull_output();
     board_periph_pin.set_high().unwrap();
+
+    /*
+    #define BOARD_I2C_SDA       18
+#define BOARD_I2C_SCL       8
+     */
+    // Setup 100 kHz i2c bus
+    let mut bus_i2c = I2C::new(
+        perphs.I2C0,
+        io.pins.gpio18,
+        io.pins.gpio8,
+        100u32.kHz(),
+        &mut system.peripheral_clock_control,
+        &clocks,
+    );
+
+    // bus_i2c.write_read(LILYGO_KB_I2C_ADDRESS, &[0xaa], &mut kb_data).ok();
+
 
     let tdeck_sclk = io.pins.gpio40;
     let tdeck_miso = io.pins.gpio38;
@@ -199,6 +222,8 @@ fn main() -> ! {
             }
         }
 
+
+
         if read_count > 0 {
             let _ = serial_port.write_bytes(&rbuf);
             let eol = rbuf[0] == 0x0d;
@@ -234,8 +259,25 @@ fn main() -> ! {
             }
         }
         else {
+            //read from the T-Keyboard via i2c
+            let mut rbuf = [0u8;1];
+            let kb_res = bus_i2c.read(LILYGO_KB_I2C_ADDRESS, &mut rbuf);
+            match kb_res {
+                Ok(..) => {
+                    if 0 != rbuf[0] {
+                        println!("\r\n0x{:02x}",rbuf[0]);
+                    }
+                },
+                Err(_err) => {
+                    println!("kb err: {:?}", _err);
+                }
+
+            }
+
             block!(timer0.wait()).unwrap();
         }
+
+
 
     }
 
