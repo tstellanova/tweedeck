@@ -1,9 +1,11 @@
 #![no_std]
 #![no_main]
+
+extern crate embedded_sdmmc;
+
 /**
 Copyright (c) 2023 Todd Stellanova. All rights reserved.
 LICENSE: BSD3 (See LICENSE file)
-
 
 Bare metal application for using the Lilygo T-Deck
 
@@ -45,6 +47,7 @@ use mipidsi::{Builder, Display};
 // LoRa info
 use sx126x::conf::Config as LoRaConfig;
 use sx126x::SX126x;
+use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
 
 // LoRa constants
 const LORA_RF_FREQUENCY: u32 = 433_000_000; // 433MHz
@@ -99,6 +102,105 @@ fn update_cursor_position( x_idx: &mut u32, y_idx: &mut u32, max_x_idx: u32, max
 }
 
 
+
+//TODO setup i2s audio output
+// fn setup_audio_output() {
+//     let i2s = I2s::new(
+//         peripherals.I2S0,
+//         MclkPin::new(io.pins.gpio4),
+//         Standard::Philips,
+//         DataFormat::Data16Channel16,
+//         44100u32.Hz(),
+//         dma_channel.configure(
+//             false,
+//             &mut tx_descriptors,
+//             &mut rx_descriptors,
+//             DmaPriority::Priority0,
+//         ),
+//         &mut system.peripheral_clock_control,
+//         &clocks,
+//     );
+// }
+
+
+struct FixedTimeSource {
+    base_timestamp: Timestamp,
+}
+
+impl FixedTimeSource {
+    // Timestamp { year_since_1970: 0, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 };
+    fn new_with_time_ms(time_ms: u64) -> Self {
+        let seconds = time_ms / 1000;
+        let minutes = seconds / 60;
+        let hours =  minutes / 60;
+
+        return FixedTimeSource {
+            base_timestamp: Timestamp {
+                year_since_1970: 53,
+                zero_indexed_month: 8,
+                zero_indexed_day: 2,
+                hours: (hours % 24) as u8,
+                minutes: (minutes % 60) as u8,
+                seconds: (seconds % 60) as u8
+            }
+
+        }
+    }
+}
+
+impl TimeSource for FixedTimeSource {
+    // #[inline(always)]
+    fn get_timestamp(&self) -> Timestamp {
+        return self.base_timestamp;
+    }
+}
+
+struct FileContextWrapper<D,T>
+where
+    D: BlockDevice,
+    T: TimeSource,
+{
+    volume_mgr: VolumeManager<D,T>,
+    volume: Volume,
+    file: File,
+}
+
+impl<D,T> FileContextWrapper<D,T>
+where
+    D: BlockDevice,
+    T: TimeSource,
+{
+    fn write(&mut self, bytes: &[u8]) {
+        let _ = self.volume_mgr.write(&mut self.volume, &mut self.file, bytes);
+    }
+
+}
+
+fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrapper<D,FixedTimeSource> {
+    let fake_time_source = FixedTimeSource::new_with_time_ms(timestamp_ms);
+    let mut volume_mgr = embedded_sdmmc::VolumeManager::new(sdcard, fake_time_source);
+    // Try and access Volume 0 (i.e. the first partition).
+    // The volume object holds information about the filesystem on that volume.
+    // It doesn't hold a reference to the Volume Manager and so must be passed back
+    // to every Volume Manager API call. This makes it easier to handle multiple
+    // volumes in parallel.
+    let mut volume0 = volume_mgr.get_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
+    println!("\r\nVolume 0: {:?}", volume0);
+    // Open the root directory (passing in the volume we're using).
+    let root_dir = volume_mgr.open_root_dir(&volume0).unwrap();
+    // Open a file called "MY_FILE.TXT" in the root directory
+    let mut my_file = volume_mgr.open_file_in_dir(
+        &mut volume0,
+        &root_dir,
+        "LOG.TXT",
+        embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
+    ).unwrap();
+    return FileContextWrapper {
+        volume_mgr,
+        volume: volume0,
+        file: my_file
+    }
+}
 #[entry]
 fn main() -> ! {
     let perphs = Peripherals::take();
@@ -129,6 +231,7 @@ fn main() -> ! {
     println!("Start setup");
 
     let io = IO::new(perphs.GPIO, perphs.IO_MUX);
+    let mut delay = Delay::new(&clocks);
 
     let mut board_periph_pin = io.pins.gpio10.into_push_pull_output();
     board_periph_pin.set_high().unwrap();
@@ -143,27 +246,65 @@ fn main() -> ! {
         &clocks,
     );
 
-    let tdeck_tft_cs = io.pins.gpio12.into_push_pull_output();
-    let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
-    let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();
-    // let _tdeck_sdcard_cs = io.pins.gpio39;
 
-    let spi2_bus = Spi::new(
+    // Interrupt pins
+    // let tdeck_touch_int = io.pins.gpio16; //ESP_TP_INT
+    // let tdeck_kb_int = io.pins.gpio46;
+
+    //T-Deck trackball (mouse) pins, reading AN48841
+    let tdeck_track_click = io.pins.gpio0.into_pull_up_input();
+    let tdeck_track_up = io.pins.gpio3.into_pull_up_input(); // G01  GS1
+    let tdeck_track_down = io.pins.gpio15.into_pull_up_input(); //  GS3
+    let tdeck_track_right = io.pins.gpio2.into_pull_up_input(); //  GS2
+    let tdeck_track_left = io.pins.gpio1.into_pull_up_input(); //   GS4
+    //TODO setup trackball interrupt handling on falling edge
+
+    // I2S audio output on MAX98357A
+    let tdeck_i2s_bck = io.pins.gpio7; //ESP_I2S_BCK
+    let tdeck_i2s_ws = io.pins.gpio5; //ESP_I2S_WS
+    let tdeck_i2c_da = io.pins.gpio6; //ESP_I2S_DA (DOUT)
+
+
+    let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
+    let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();//enables backlight?
+    // Note that AW9364 LED driver is used to drive TFT backlight
+
+    // SPI chip select pins
+    let mut tdeck_tft_cs = io.pins.gpio12.into_push_pull_output();
+    let mut tdeck_lora_cs = io.pins.gpio9.into_push_pull_output();
+    let mut tdeck_sdcard_cs = io.pins.gpio39.into_push_pull_output();
+
+    // set CS pins high
+    tdeck_sdcard_cs.set_high().unwrap();
+    tdeck_lora_cs.set_high().unwrap();
+    tdeck_tft_cs.set_high().unwrap();
+
+    let spi2_raw = Spi::new(
         perphs.SPI2,
         io.pins.gpio40, //tdeck_sclk,
         io.pins.gpio41, //tdeck_mosi,
         io.pins.gpio38, //tdeck_miso,
-        tdeck_tft_cs,
+        tdeck_tft_cs, // TODO I guess this is a default CS for the bus?
         60u32.MHz(),
         SpiMode::Mode0,
         &mut system.peripheral_clock_control,
         &clocks,
     );
-    tft_enable_pin.set_high().unwrap();
+    // create a shared_bus so we can share SPI among multiple devices
+    let spi2_bus = shared_bus::BusManagerSimple::new(spi2_raw);
+    let sdcard = embedded_sdmmc::SdCard::new(spi2_bus.acquire_spi(), tdeck_sdcard_cs, delay);
+    println!("sdcard {} bytes", sdcard.num_bytes().unwrap());
+    let mut log_file_ctx = open_logfile(sdcard,     rtc.get_time_ms() );
+    log_file_ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
+    log_file_ctx.volume_mgr.close_file(&log_file_ctx.volume, log_file_ctx.file);
 
-    // let di = SPIInterface::new(spi_tft, tdeck_tft_dc, tdeck_tft_cs);
-    let di = SPIInterfaceNoCS::new(spi2_bus, tdeck_tft_dc);
-    let mut delay = Delay::new(&clocks);
+    // TODO setup audio output on   ESP_I2S_BCK, ESP_I2S_WS, ESP_I2S_DOUT;
+    // TODO setup ES7210 (analog voice ADC from mic) on i2cs? address ES7210_AD1_AD0_00 = 0x40,
+
+    // Setup TFT display
+    tft_enable_pin.set_high().unwrap();
+    // let di = SPIInterface::new(spi2_bus, tdeck_tft_dc, tdeck_tft_cs);
+    let di = SPIInterfaceNoCS::new(spi2_bus.acquire_spi(), tdeck_tft_dc);
     let mut display = Builder::st7789(di)
         .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16,)
         .with_orientation(mipidsi::Orientation::Landscape(true))
