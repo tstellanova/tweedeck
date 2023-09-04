@@ -1,3 +1,5 @@
+#![no_std]
+#![no_main]
 /**
 Copyright (c) 2023 Todd Stellanova. All rights reserved.
 LICENSE: BSD3 (See LICENSE file)
@@ -6,10 +8,6 @@ LICENSE: BSD3 (See LICENSE file)
 Bare metal application for using the Lilygo T-Deck
 
 */
-
-#![no_std]
-#![no_main]
-
 // use core::fmt::Write;
 use nb::block;
 
@@ -56,8 +54,8 @@ const DISPLAY_W: usize = 320;
 const DISPLAY_H: usize = 240;
 
 const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
-const OUT_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, (DISPLAY_SIZE.height*2)/3);
-const IN_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, DISPLAY_SIZE.height/3);
+const OUT_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, (DISPLAY_SIZE.height*5)/6);
+const IN_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, DISPLAY_SIZE.height/6);
 const OUT_VIEW_TOP_LEFT: Point = Point::new(0, 0);
 const IN_VIEW_TOP_LEFT: Point = Point::new(0, OUT_VIEW_SIZE.height as i32);
 
