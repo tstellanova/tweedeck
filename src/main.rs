@@ -1,9 +1,7 @@
 #![no_std]
 #![no_main]
 
-extern crate embedded_graphics;
-
-use core::fmt::Write;
+// use core::fmt::Write;
 use nb::block;
 
 use esp_backtrace as _;
@@ -95,6 +93,7 @@ fn update_cursor_position( x_idx: &mut u32, y_idx: &mut u32, max_x_idx: u32, max
     }
 }
 
+
 #[entry]
 fn main() -> ! {
     let perphs = Peripherals::take();
@@ -164,7 +163,7 @@ fn main() -> ! {
         .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16,)
         .with_orientation(mipidsi::Orientation::Landscape(true))
         .with_invert_colors(mipidsi::ColorInversion::Inverted)
-        .with_framebuffer_size(DISPLAY_H as u16, DISPLAY_W as u16,) //TODO remember this is rotated
+        .with_framebuffer_size(DISPLAY_H as u16, DISPLAY_W as u16,) //remember this is rotated
         .init(&mut delay, Some(tft_enable_pin))
         .unwrap();
 
@@ -192,10 +191,10 @@ fn main() -> ! {
         .stroke_width(1)
         .fill_color(Rgb565::BLACK)
         .build();
-    Rectangle::new(IN_VIEW_TOP_LEFT, IN_VIEW_SIZE)
-        .into_styled(input_view_box_style)
-        .draw(&mut display).unwrap();
+    let input_view_rect = Rectangle::new(IN_VIEW_TOP_LEFT, IN_VIEW_SIZE)
+        .into_styled(input_view_box_style);
 
+    input_view_rect.draw(&mut display).unwrap();
 
     // let text_style = MonoTextStyle::new(&text_font, Rgb565::RED);// no bg fill
     let output_text_style = MonoTextStyleBuilder::new()
@@ -237,23 +236,26 @@ fn main() -> ! {
         &mut system.peripheral_clock_control,
         );
 
-    timer0.start(100u64.millis());
+    timer0.start(50u64.millis());
     loop {
         let mut rbuf:[u8;1] = [0u8];
+        let mut action_count = 0;
 
         // read from the serial port UART0 and display
         {
             // let mut read_count = 0;
             if let Ok(rb) = uart0.read() {
+                action_count += 1;
                 let eol =  rb == 0x0d;
                 rbuf[0] = rb;
+
                 // TODO disable echo -- used for debugging purposes only
-                let _ = uart0.write_bytes(&rbuf);
-                if eol {
-                    //tack on a linefeed
-                    rbuf[0] = 0x0a;
-                    let _ = uart0.write_bytes(&rbuf);
-                }
+                //let _ = uart0.write_bytes(&rbuf);
+                // if eol {
+                //     //tack on a linefeed
+                //     let crlf: [u8;2] = [0x0d, 0x0a];
+                //     let _ = uart0.write_bytes(&crlf);
+                // }
 
                 let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
                                   Point::new(
@@ -268,12 +270,12 @@ fn main() -> ! {
 
         //read from the T-Keyboard via i2c
         {
-            let mut rbuf = [0u8;1];
             let kb_res = i2c0_bus.read(LILYGO_KB_I2C_ADDRESS, &mut rbuf);
             match kb_res {
                 Ok(..) => {
                     if 0 != rbuf[0] {
                         //println!("\r\n0x{:02x}",rbuf[0]);
+                        action_count += 1;
                         let eol = rbuf[0] == 0x0d;
                         let _ = Text::new(core::str::from_utf8(&rbuf).unwrap(),
                                           Point::new(
@@ -288,18 +290,22 @@ fn main() -> ! {
                             //tack on a linefeed
                             rbuf[0] = 0x0a;
                             let _ = uart0.write_bytes(&rbuf);
+                            // clear input field
+                            input_view_rect.draw(&mut display).unwrap();
+                            input_x_idx = 0;
+                            input_y_idx = 0;
                         }
                     }
                 },
                 Err(_err) => {
                     println!("kb err: {:?}", _err);
                 }
-
             }
         }
-        block!(timer0.wait()).unwrap();
 
-
+        if 0 == action_count {
+            block!(timer0.wait()).unwrap();
+        }
 
     }
 
