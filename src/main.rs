@@ -11,10 +11,8 @@ use hal::{
     Delay,
     clock::ClockControl,
     i2c::I2C,
-
     IO,
     peripherals::Peripherals,
-
     timer::TimerGroup,
     Rtc,
     spi::{Spi, SpiMode},
@@ -23,7 +21,8 @@ use hal::{
     };
 
 use embedded_graphics::{
-    mono_font::{ascii::FONT_9X15_BOLD, MonoFont, MonoTextStyle, MonoTextStyleBuilder},
+    mono_font::{ascii::{FONT_9X15_BOLD, FONT_8X13_BOLD},
+                MonoFont, MonoTextStyle, MonoTextStyleBuilder},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Rectangle, PrimitiveStyleBuilder},
@@ -58,7 +57,7 @@ const IN_VIEW_TOP_LEFT: Point = Point::new(0, OUT_VIEW_SIZE.height as i32);
 const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
 
 const INPUT_TEXT_FONT: MonoFont = FONT_9X15_BOLD;
-const OUTPUT_TEXT_FONT: MonoFont = FONT_9X15_BOLD;
+const OUTPUT_TEXT_FONT: MonoFont = FONT_8X13_BOLD;
 const OUT_CHAR_W:u32 = OUTPUT_TEXT_FONT.character_size.width as u32;
 const OUT_CHAR_H:u32 = OUTPUT_TEXT_FONT.character_size.height as u32;
 const IN_CHAR_W:u32 = INPUT_TEXT_FONT.character_size.width as u32;
@@ -199,13 +198,13 @@ fn main() -> ! {
     // let text_style = MonoTextStyle::new(&text_font, Rgb565::RED);// no bg fill
     let output_text_style = MonoTextStyleBuilder::new()
         .font(&OUTPUT_TEXT_FONT)
-        .text_color(Rgb565::RED)
+        .text_color(Rgb565::GREEN)
         .background_color(Rgb565::BLACK) //fill with black
         .build();
 
     let kb_text_style = MonoTextStyleBuilder::new()
-        .font(&OUTPUT_TEXT_FONT)
-        .text_color(Rgb565::GREEN)
+        .font(&INPUT_TEXT_FONT)
+        .text_color(Rgb565::RED)
         .background_color(Rgb565::BLACK)
         .build();
 
