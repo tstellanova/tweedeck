@@ -2,10 +2,15 @@
 #![no_std]
 #![no_main]
 
+
+
 /**
 Copyright (c) 2023 Todd Stellanova, All Rights Reserved
 License: BSD3 (see LICENSE file)
 */
+extern crate alloc;
+
+use core::mem::MaybeUninit;
 
 
 use esp32s3_hal as hal;
@@ -19,7 +24,7 @@ use hal::{
     clock::ClockControl,
     i2c::I2C,
     IO,
-    peripherals::{Peripherals, I2C0, TIMG0, UART0},
+    peripherals::{Peripherals, I2C0, SPI2, TIMG0, UART0},
     timer::{Timer0, TimerGroup},
     Rtc,
     spi::{Spi, SpiMode, FullDuplexMode},
@@ -28,7 +33,9 @@ use hal::{
     uart::{TxRxPins, config::*},
 };
 
-use shared_bus::{BusManager, BusManagerSimple, NullMutex};
+
+use shared_bus::{BusManager, BusManagerSimple, NullMutex, SpiProxy};
+
 
 #[cfg(feature = "emdisplay")]
 use embedded_graphics::{
@@ -46,40 +53,66 @@ use display_interface_spi::SPIInterfaceNoCS;
 
 // Provides the Display builder
 #[cfg(feature = "emdisplay")]
-use mipidsi::{Builder, Display};
+use mipidsi::{Builder, Display, models::ST7789};
+
 
 // LoRa info
-use sx126x::conf::Config as LoRaConfig;
-use sx126x::SX126x;
+#[cfg(feature = "lorawan")]
+use sx126x::{SX126x, conf::Config as LoRaConfig};
 
 // SD-MMC card
 #[cfg(feature = "sdcard")]
 use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
 
-use shared_bus::SpiProxy;
-use mipidsi::models::ST7789;
+
+// use alloc::sync::{Arc};
+// use alloc::boxed::Box;
+// use atomic_ref::AtomicRef;
 
 
 pub const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
 
 // Display dimensions
 #[cfg(feature = "emdisplay")]
-const DISPLAY_W: usize = 320;
+pub const DISPLAY_W: usize = 320;
 #[cfg(feature = "emdisplay")]
-const DISPLAY_H: usize = 240;
+pub const DISPLAY_H: usize = 240;
 #[cfg(feature = "emdisplay")]
-const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
+pub const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
 
 
-type Spi2BusType<'a> = BusManager<NullMutex<Spi<'a, hal::peripherals::SPI2, FullDuplexMode>>>;
+// type Spi2BusType<'a> = BusManager<NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
+type Spi2BusType<'a> = Spi<'a, SPI2, FullDuplexMode>;
+// type Spi2ProxyType<'a> = SpiProxy<'a, NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
+type Spi2ProxyType<'a> = Spi<'a, SPI2, FullDuplexMode>;
 
 #[cfg(feature = "sdcard")]
-type SdCardtype<'a> = SdCard<SpiProxy<'a, NullMutex<Spi<'a, hal::peripherals::SPI2, FullDuplexMode>>>, GpioPin<Output<PushPull>, 39>, Delay>;
+type SdCardType<'a> = SdCard<Spi2ProxyType<'a>, GpioPin<Output<PushPull>, 39>, Delay>;
 
 #[cfg(feature = "emdisplay")]
-type DisplayInterfaceType < 'a > = SPIInterfaceNoCS < Spi2BusType <'a >, Output < PushPull > >;
+type DisplayInterfaceType < 'a > = SPIInterfaceNoCS < Spi2ProxyType <'a >, Output < PushPull > >;
+// type DisplayInterfaceType < 'a > =SPIInterfaceNoCS<BusManager<NullMutex<Spi2BusType<'a>>, Output<PushPull>>>;
+
 #[cfg(feature = "emdisplay")]
-type DisplayType < 'a > = Display < DisplayInterfaceType < 'a>, ST7789, Output < PushPull > >;
+type DisplayType <'a> = Display<
+    SPIInterfaceNoCS<Spi2ProxyType<'a>, GpioPin<Output<esp32s3_hal::gpio::PushPull>, 11>>,
+    ST7789,
+    GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42>
+>;
+// type DisplayType < 'a > = Display < DisplayInterfaceType < 'a>, ST7789, GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42> >;
+
+
+#[global_allocator]
+static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+
+fn init_heap() {
+    const HEAP_SIZE: usize = 32 * 1024;
+    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
+
+    unsafe {
+        ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
+    }
+}
 
 pub struct Board<'a> {
     // peripherals: Peripherals,
@@ -88,24 +121,22 @@ pub struct Board<'a> {
     pub delay_source: Delay,
 
     pub uart0: Uart<'a, UART0>,
-    pub spi2_bus: Spi2BusType<'a>,
+    // pub spi2_bus: Spi2BusType<'a>,
     pub i2c0_bus: I2C<'a, I2C0>,
 
-
     // Trackball pins
-    tball_click: GpioPin<Input<PullUp>, 0>,
-    tball_up: GpioPin<Input<PullUp>, 3>,
-    tball_right: GpioPin<Input<PullUp>, 2>,
-    tball_down: GpioPin<Input<PullUp>, 15>,
-    tball_left: GpioPin<Input<PullUp>, 1>,
+    pub tball_click: GpioPin<Input<PullUp>, 0>,
+    pub tball_up: GpioPin<Input<PullUp>, 3>,
+    pub tball_right: GpioPin<Input<PullUp>, 2>,
+    pub tball_down: GpioPin<Input<PullUp>, 15>,
+    pub tball_left: GpioPin<Input<PullUp>, 1>,
 
 
     #[cfg(feature = "sdcard")]
-    pub sdcard: SdCardtype<'a>,
+    pub sdcard: Option<SdCardType<'a>>,
 
     #[cfg(feature = "emdisplay")]
     pub display: DisplayType<'a>,
-
 
 
 //TODO add feature-flag-wrapped fields
@@ -113,7 +144,7 @@ pub struct Board<'a> {
 
 impl Board<'_> {
 
-    pub fn new() -> Self  {
+    pub fn new() -> Self {
         let perphs = Peripherals::take();
         let mut system = perphs.SYSTEM.split();
         let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
@@ -124,7 +155,7 @@ impl Board<'_> {
             &mut system.peripheral_clock_control,
         );
         let mut wdt0 = timer_group0.wdt;
-        let mut timer0 = timer_group0.timer0;
+        let timer0 = timer_group0.timer0;
 
         let timer_group1 = TimerGroup::new(
             perphs.TIMG1,
@@ -140,6 +171,7 @@ impl Board<'_> {
         wdt1.disable();
 
         println!("Start setup");
+        init_heap();
 
         let io = IO::new(perphs.GPIO, perphs.IO_MUX);
         let mut delay = Delay::new(&clocks);
@@ -148,7 +180,7 @@ impl Board<'_> {
         board_periph_pin.set_high().unwrap();
 
         // Setup 100 kHz i2c0 bus
-        let mut i2c0_bus = I2C::new(
+        let i2c0_bus = I2C::new(
             perphs.I2C0,
             io.pins.gpio18, //I2C0 SDA
             io.pins.gpio8, //I2C0 SCL
@@ -169,7 +201,7 @@ impl Board<'_> {
             io.pins.gpio44.into_floating_input(), //GPIO 44 U0RXD
         );
 
-        let mut uart0 = Uart::new_with_config(
+        let uart0 = Uart::new_with_config(
             perphs.UART0,
             Some(uart_config),
             Some(uart_pins),
@@ -196,7 +228,8 @@ impl Board<'_> {
         let mut tdeck_lora_cs = io.pins.gpio9.into_push_pull_output();
         let mut tdeck_sdcard_cs = io.pins.gpio39.into_push_pull_output();
 
-        // set CS pins high
+        // set all SPI CS pins high initially
+        tdeck_tft_cs.set_high().unwrap();
         tdeck_sdcard_cs.set_high().unwrap();
         tdeck_lora_cs.set_high().unwrap();
 
@@ -211,66 +244,61 @@ impl Board<'_> {
             &mut system.peripheral_clock_control,
             &clocks,
         );
+        let spi2_bus = spi2_raw;
         // create a shared_bus so we can share SPI among multiple devices
-        let spi2_bus = shared_bus::BusManagerSimple::new(spi2_raw);
+        // SPI2_BUS.store(shared_bus::BusManagerSimple::new(spi2_raw));
+        // let strong0 = Arc::new(spi2_raw);
+        // let strong0 =  Arc::new(Box::new(shared_bus::BusManagerSimple::new(spi2_raw)));
 
 
         // TODO setup audio output on   ESP_I2S_BCK, ESP_I2S_WS, ESP_I2S_DOUT;
         // TODO setup ES7210 (analog voice ADC from mic) on i2cs? address ES7210_AD1_AD0_00 = 0x40,
 
         #[cfg(feature = "sdcard")]
-            {
-                let sdcard = embedded_sdmmc::SdCard::new(spi2_bus.acquire_spi(), tdeck_sdcard_cs, delay);
-                println!("sdcard {} bytes", sdcard.num_bytes().unwrap());
-                let mut log_file_ctx = open_logfile(sdcard,     rtc.get_time_ms() );
-                log_file_ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
-                log_file_ctx.volume_mgr.close_file(&log_file_ctx.volume, log_file_ctx.file);
-            }
+        let sdcard_local = embedded_sdmmc::SdCard::new(weakling1.acquire_spi(), tdeck_sdcard_cs, delay);
+        // println!("sdcard {} bytes", sdcard.num_bytes().unwrap());
+        // let mut log_file_ctx = open_logfile(sdcard,     rtc.get_time_ms() );
+        // log_file_ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
+        // log_file_ctx.volume_mgr.close_file(&log_file_ctx.volume, log_file_ctx.file);
 
+        let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
+        let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();//enables backlight?
+
+        // Setup TFT display
         #[cfg(feature = "emdisplay")]
-            {
-                let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
-                let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();//enables backlight?
-                tdeck_tft_cs.set_high().unwrap();
+        tft_enable_pin.set_high().unwrap();
+        #[cfg(feature = "emdisplay")]
+        let di = SPIInterfaceNoCS::new(spi2_bus, tdeck_tft_dc);
+        #[cfg(feature = "emdisplay")]
+        let gfx_display = Builder::st7789(di)
+                .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16, )
+                .with_orientation(mipidsi::Orientation::Landscape(true))
+                .with_invert_colors(mipidsi::ColorInversion::Inverted)
+                .with_framebuffer_size(DISPLAY_H as u16, DISPLAY_W as u16, ) //remember this is rotated
+                .init(&mut delay, Some(tft_enable_pin))
+                .unwrap();
 
-                // Setup TFT display
-                tft_enable_pin.set_high().unwrap();
-                // let di = SPIInterface::new(spi2_bus, tdeck_tft_dc, tdeck_tft_cs);
-                let di = SPIInterfaceNoCS::new(spi2_bus.acquire_spi(), tdeck_tft_dc);
-                let mut display = Builder::st7789(di)
-                    .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16, )
-                    .with_orientation(mipidsi::Orientation::Landscape(true))
-                    .with_invert_colors(mipidsi::ColorInversion::Inverted)
-                    .with_framebuffer_size(DISPLAY_H as u16, DISPLAY_W as u16, ) //remember this is rotated
-                    .init(&mut delay, Some(tft_enable_pin))
-                    .unwrap();
-            }
-
-        return Board {
+        Board {
             //peripherals: perphs,
             timer0: timer0,
             board_periph_pin: board_periph_pin,
             delay_source: delay,
 
             uart0: uart0,
-            spi2_bus: spi2_bus,
+            // spi2_bus: spi2_bus,
             i2c0_bus: i2c0_bus,
-
-
 
             tball_click: tdeck_track_click,
             tball_up: tdeck_track_up,
             tball_right: tdeck_track_right,
             tball_down: tdeck_track_down,
             tball_left: tdeck_track_left,
-
             #[cfg(feature = "emdisplay")]
-            display: display,
-
+            display: gfx_display,
             #[cfg(feature = "sdcard")]
-            sdcard: Some(sdcard),
-
+            sdcard: Some(sdcard_local),
         }
+
 
     }
 //TODO setup i2s audio output
@@ -371,7 +399,7 @@ fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrap
     // Open the root directory (passing in the volume we're using).
     let root_dir = volume_mgr.open_root_dir(&volume0).unwrap();
     // Open a file called "MY_FILE.TXT" in the root directory
-    let mut my_file = volume_mgr.open_file_in_dir(
+    let my_file = volume_mgr.open_file_in_dir(
         &mut volume0,
         &root_dir,
         "LOG.TXT",

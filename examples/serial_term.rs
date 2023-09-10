@@ -1,38 +1,22 @@
 #![no_std]
 #![no_main]
 
+extern crate tweedeck;
+
 /**
 Copyright (c) 2023 Todd Stellanova. All rights reserved.
 LICENSE: BSD3 (See LICENSE file)
 
-Bare metal application for using the Lilygo T-Deck
+Bare metal app that shows how to open a serial port (UART0),
+send and receive data, and display on the embedded graphics display.
 
 */
 
 
 use esp32s3_hal as hal;
-use crate::board::Board;
-
-// use core::fmt::Write;
-use nb::block;
-
-use esp_backtrace as _;
-use esp_println::println;
-
 use hal::{
     prelude::*,
-    Delay,
-    clock::ClockControl,
-    i2c::I2C,
-    IO,
-    peripherals::Peripherals,
-    timer::TimerGroup,
-    Rtc,
-    spi::{Spi, SpiMode},
-    Uart,
-    uart::{TxRxPins, config::*},
-    };
-
+};
 use embedded_graphics::{
     mono_font::{ascii::{FONT_9X15_BOLD, FONT_8X13_BOLD},
                 MonoFont, MonoTextStyle, MonoTextStyleBuilder},
@@ -42,19 +26,11 @@ use embedded_graphics::{
     text::{Text, TextStyle},
 };
 
-// Provides the parallel port and display interface builders
-use display_interface_spi::SPIInterfaceNoCS;
+use nb::block;
+use esp_backtrace as _;
+use esp_println::println;
+use tweedeck::{Board, LILYGO_KB_I2C_ADDRESS, DISPLAY_SIZE};
 
-// Provides the Display builder
-use mipidsi::{Builder, Display};
-
-
-//
-// Display dimensions
-const DISPLAY_W: usize = 320;
-const DISPLAY_H: usize = 240;
-
-const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
 const OUT_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, (DISPLAY_SIZE.height*5)/6);
 const IN_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, DISPLAY_SIZE.height/6);
 const OUT_VIEW_TOP_LEFT: Point = Point::new(0, 0);
@@ -103,7 +79,7 @@ fn update_cursor_position( x_idx: &mut u32, y_idx: &mut u32, max_x_idx: u32, max
 
 #[entry]
 fn main() -> ! {
-    let board = board::Board::new();
+    let mut board = Board::new();
 
     // Draw a box around the total display  area
     let box_style = PrimitiveStyleBuilder::new()
@@ -111,7 +87,7 @@ fn main() -> ! {
         .stroke_width(1)
         .fill_color(Rgb565::BLACK)
         .build();
-    Rectangle::new(Point::new(0,0),Size::new(DISPLAY_W as u32,DISPLAY_H as u32))
+    Rectangle::new(Point::new(0,0),DISPLAY_SIZE)
         .into_styled(box_style)
         .draw(&mut board.display).unwrap();
     // Draw a box around the output view
@@ -153,7 +129,7 @@ fn main() -> ! {
     let mut input_y_idx: u32 = 0;
 
 
-    timer0.start(50u64.millis());
+    board.timer0.start(50u64.millis());
     loop {
         let mut rbuf:[u8;1] = [0u8];
         let mut action_count = 0;
@@ -179,15 +155,15 @@ fn main() -> ! {
                                       OUT_VIEW_TXT_TOP_LEFT.x + (output_x_idx * OUT_CHAR_W) as i32,
                                       OUT_VIEW_TXT_TOP_LEFT.y + (output_y_idx * OUT_CHAR_H) as i32),
                                   output_text_style)
-                    .draw(&mut display)
+                    .draw(&mut board.display)
                     .unwrap();
                 update_cursor_position(&mut output_x_idx, &mut output_y_idx, MAX_OUT_X_IDX, MAX_OUT_Y_IDX, eol);
             }
         }
 
-        //read from the T-Keyboard via i2c
+        //read from the T-Keyboard via i2c and send data to correspondent via uart
         {
-            let kb_res = i2c0_bus.read(LILYGO_KB_I2C_ADDRESS, &mut rbuf);
+            let kb_res = board.i2c0_bus.read(LILYGO_KB_I2C_ADDRESS, &mut rbuf);
             match kb_res {
                 Ok(..) => {
                     if 0 != rbuf[0] {
@@ -199,7 +175,7 @@ fn main() -> ! {
                                               IN_VIEW_TXT_TOP_LEFT.x + (input_x_idx * OUT_CHAR_W) as i32,
                                               IN_VIEW_TXT_TOP_LEFT.y + (input_y_idx * OUT_CHAR_H) as i32),
                                           kb_text_style)
-                            .draw(&mut display)
+                            .draw(&mut board.display)
                             .unwrap();
                         update_cursor_position(&mut input_x_idx, &mut input_y_idx, MAX_IN_X_IDX, MAX_IN_Y_IDX, eol);
                         let _ = board.uart0.write_bytes(&rbuf);
@@ -208,7 +184,7 @@ fn main() -> ! {
                             rbuf[0] = 0x0a;
                             let _ = board.uart0.write_bytes(&rbuf);
                             // clear input field
-                            input_view_rect.draw(&mut display).unwrap();
+                            input_view_rect.draw(&mut board.display).unwrap();
                             input_x_idx = 0;
                             input_y_idx = 0;
                         }

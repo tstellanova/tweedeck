@@ -18,11 +18,11 @@ use hal::{
 use nb::block;
 use esp_backtrace as _;
 use esp_println::println;
-use crate::{Board, LILYGO_KB_I2C_ADDRESS};
+use tweedeck::{Board, LILYGO_KB_I2C_ADDRESS};
 
 #[entry]
 fn main() -> ! {
-    let board = Board::new();
+    let mut board = Board::new();
 
     board.timer0.start(50u64.millis());
     loop {

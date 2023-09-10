@@ -1,5 +1,5 @@
 [package]
-name = "tdeckterm"
+name = "tweedeck"
 version = "0.1.0"
 authors = ["Todd Stellanova <tstellanova@users-noreply.github.com>"]
 edition = "2021"
@@ -18,6 +18,7 @@ lorawan = []
 esp32s3-hal = { version = "0.11.0" }
 esp-backtrace = { version = "0.7.0", features = ["esp32s3", "panic-handler", "exception-handler", "print-uart"] }
 esp-println       = { version = "0.5.0", features = ["esp32s3"] }
+esp-alloc = { version = "0.3.0" }
 #critical-section  = "1.1.2"
 mipidsi = "0.7.1"
 embedded-graphics = "0.8.1"
@@ -27,3 +28,7 @@ display-interface-spi = "0.4.1"
 sx126x = "0.1.1"
 embedded-sdmmc = "0.5.0"
 shared-bus = "0.3.0"
+#static-rc = "0.6.1"
+#lazy_static = "1.4.0"
+atomic_ref = "0.2.1"
+
