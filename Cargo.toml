@@ -30,5 +30,5 @@ embedded-sdmmc = "0.5.0"
 shared-bus = "0.3.0"
 #static-rc = "0.6.1"
 #lazy_static = "1.4.0"
-atomic_ref = "0.2.1"
+#atomic_ref = "0.2.1"
 

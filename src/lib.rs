@@ -131,7 +131,6 @@ pub struct Board<'a> {
     pub tball_down: GpioPin<Input<PullUp>, 15>,
     pub tball_left: GpioPin<Input<PullUp>, 1>,
 
-
     #[cfg(feature = "sdcard")]
     pub sdcard: Option<SdCardType<'a>>,
 
@@ -188,6 +187,10 @@ impl Board<'_> {
             &mut system.peripheral_clock_control,
             &clocks,
         );
+        // TODO setup GT911 capactive touch driver on i2c0 :
+        // const GT911_ADDRESS1:u8 =  0x5d;
+        // const GT911_ADDRESS2:u8 =  0x14;
+        // TODO setup es7210_adc audio input on i2c0 / i2s ?
 
         let uart_config = Config {
             baudrate: 115200,
@@ -228,7 +231,7 @@ impl Board<'_> {
         let mut tdeck_lora_cs = io.pins.gpio9.into_push_pull_output();
         let mut tdeck_sdcard_cs = io.pins.gpio39.into_push_pull_output();
 
-        // set all SPI CS pins high initially
+        // set all SPI CS pins high initially (this disables them)
         tdeck_tft_cs.set_high().unwrap();
         tdeck_sdcard_cs.set_high().unwrap();
         tdeck_lora_cs.set_high().unwrap();
@@ -245,14 +248,12 @@ impl Board<'_> {
             &clocks,
         );
         let spi2_bus = spi2_raw;
-        // create a shared_bus so we can share SPI among multiple devices
-        // SPI2_BUS.store(shared_bus::BusManagerSimple::new(spi2_raw));
-        // let strong0 = Arc::new(spi2_raw);
-        // let strong0 =  Arc::new(Box::new(shared_bus::BusManagerSimple::new(spi2_raw)));
+        // TODO create a shared_bus so we can share SPI among multiple devices
+        // let spi2_bus = shared_bus::BusManagerSimple::new(spi2_raw);
 
 
         // TODO setup audio output on   ESP_I2S_BCK, ESP_I2S_WS, ESP_I2S_DOUT;
-        // TODO setup ES7210 (analog voice ADC from mic) on i2cs? address ES7210_AD1_AD0_00 = 0x40,
+        // TODO setup ES7210 (analog voice ADC from mic) on i2c0_bus? address ES7210_AD1_AD0_00 = 0x40,
 
         #[cfg(feature = "sdcard")]
         let sdcard_local = embedded_sdmmc::SdCard::new(weakling1.acquire_spi(), tdeck_sdcard_cs, delay);
@@ -279,7 +280,6 @@ impl Board<'_> {
                 .unwrap();
 
         Board {
-            //peripherals: perphs,
             timer0: timer0,
             board_periph_pin: board_periph_pin,
             delay_source: delay,
