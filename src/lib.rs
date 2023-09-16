@@ -34,7 +34,7 @@ use hal::{
 };
 
 
-use shared_bus::{BusManager, BusManagerSimple, NullMutex, SpiProxy};
+// use shared_bus::{BusManager, BusManagerSimple, NullMutex, SpiProxy};
 
 
 #[cfg(feature = "emdisplay")]
@@ -49,7 +49,7 @@ use embedded_graphics::{
 
 // Provides the parallel port and display interface builders
 #[cfg(feature = "emdisplay")]
-use display_interface_spi::SPIInterfaceNoCS;
+use display_interface_spi::{SPIInterface, SPIInterfaceNoCS};
 
 // Provides the Display builder
 #[cfg(feature = "emdisplay")]
@@ -82,7 +82,7 @@ pub const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
 
 
 // type Spi2BusType<'a> = BusManager<NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
-type Spi2BusType<'a> = Spi<'a, SPI2, FullDuplexMode>;
+// type Spi2BusType<'a> = Spi<'a, SPI2, FullDuplexMode>;
 // type Spi2ProxyType<'a> = SpiProxy<'a, NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
 type Spi2ProxyType<'a> = Spi<'a, SPI2, FullDuplexMode>;
 
@@ -90,16 +90,12 @@ type Spi2ProxyType<'a> = Spi<'a, SPI2, FullDuplexMode>;
 type SdCardType<'a> = SdCard<Spi2ProxyType<'a>, GpioPin<Output<PushPull>, 39>, Delay>;
 
 #[cfg(feature = "emdisplay")]
-type DisplayInterfaceType < 'a > = SPIInterfaceNoCS < Spi2ProxyType <'a >, Output < PushPull > >;
-// type DisplayInterfaceType < 'a > =SPIInterfaceNoCS<BusManager<NullMutex<Spi2BusType<'a>>, Output<PushPull>>>;
-
-#[cfg(feature = "emdisplay")]
 type DisplayType <'a> = Display<
-    SPIInterfaceNoCS<Spi2ProxyType<'a>, GpioPin<Output<esp32s3_hal::gpio::PushPull>, 11>>,
+    // SPIInterfaceNoCS<Spi2ProxyType<'a>, GpioPin<Output<esp32s3_hal::gpio::PushPull>, 11>>,
+    SPIInterface<Spi2ProxyType<'a>,  GpioPin<Output<PushPull>, 11>, GpioPin<Output<PushPull>, 12>>,
     ST7789,
     GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42>
 >;
-// type DisplayType < 'a > = Display < DisplayInterfaceType < 'a>, ST7789, GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42> >;
 
 
 #[global_allocator]
@@ -236,12 +232,12 @@ impl Board<'_> {
         tdeck_sdcard_cs.set_high().unwrap();
         tdeck_lora_cs.set_high().unwrap();
 
-        let spi2_raw = Spi::new(
+        let spi2_raw = Spi::new_no_cs(
             perphs.SPI2,
             io.pins.gpio40, //tdeck_sclk,
             io.pins.gpio41, //tdeck_mosi,
             io.pins.gpio38, //tdeck_miso,
-            tdeck_tft_cs, // TODO I guess this is a default CS for the bus?
+            // tdeck_tft_cs, // TODO I guess this is a default CS for the bus?
             60u32.MHz(),
             SpiMode::Mode0,
             &mut system.peripheral_clock_control,
@@ -262,22 +258,23 @@ impl Board<'_> {
         // log_file_ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
         // log_file_ctx.volume_mgr.close_file(&log_file_ctx.volume, log_file_ctx.file);
 
-        let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
-        let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();//enables backlight?
-
         // Setup TFT display
         #[cfg(feature = "emdisplay")]
-        tft_enable_pin.set_high().unwrap();
-        #[cfg(feature = "emdisplay")]
-        let di = SPIInterfaceNoCS::new(spi2_bus, tdeck_tft_dc);
-        #[cfg(feature = "emdisplay")]
-        let gfx_display = Builder::st7789(di)
-                .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16, )
-                .with_orientation(mipidsi::Orientation::Landscape(true))
-                .with_invert_colors(mipidsi::ColorInversion::Inverted)
-                .with_framebuffer_size(DISPLAY_H as u16, DISPLAY_W as u16, ) //remember this is rotated
-                .init(&mut delay, Some(tft_enable_pin))
-                .unwrap();
+        let gfx_display = {
+            let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
+            let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();//enables backlight?
+            tft_enable_pin.set_high().unwrap();
+            // let di = SPIInterfaceNoCS::new(spi2_bus, tdeck_tft_dc);
+            let di = SPIInterface::new(spi2_bus, tdeck_tft_dc, tdeck_tft_cs);
+            Builder::st7789(di)
+            .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16, )
+            .with_orientation(mipidsi::Orientation::Landscape(true))
+            .with_invert_colors(mipidsi::ColorInversion::Inverted)
+            .with_framebuffer_size(DISPLAY_H as u16, DISPLAY_W as u16, ) //remember this is rotated
+            .init(&mut delay, Some(tft_enable_pin))
+            .unwrap()
+        };
+
 
         Board {
             timer0: timer0,
