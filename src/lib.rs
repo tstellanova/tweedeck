@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 #![no_std]
 #![no_main]
-
+#![feature(const_maybe_uninit_zeroed)]
 
 
 /**
@@ -11,6 +11,9 @@ License: BSD3 (see LICENSE file)
 extern crate alloc;
 
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicPtr, Ordering};
+//use core::cell::RefCell;
+//use critical_section::Mutex;
 
 
 use esp32s3_hal as hal;
@@ -34,7 +37,7 @@ use hal::{
 };
 
 
-// use shared_bus::{BusManager, BusManagerSimple, NullMutex, SpiProxy};
+use shared_bus::{BusManager, BusManagerSimple, NullMutex, I2cProxy, SpiProxy, XtensaMutex};
 
 
 #[cfg(feature = "emdisplay")]
@@ -64,13 +67,19 @@ use sx126x::{SX126x, conf::Config as LoRaConfig};
 #[cfg(feature = "sdcard")]
 use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
 
-
-// use alloc::sync::{Arc};
+use alloc::rc::{Rc};
+use alloc::sync::{Arc, Weak};
 // use alloc::boxed::Box;
-// use atomic_ref::AtomicRef;
 
 
 pub const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
+
+type SharedBusMutex<T>  = XtensaMutex<T>; // was originally NullMutex for BusManagerSimple
+type I2c0RawBusType<'a> = I2C<'a, I2C0>;
+type I2c0MutexBusType<'a> = SharedBusMutex<I2c0RawBusType<'a>>; 
+type I2c0BusType<'a> = BusManager<I2c0MutexBusType<'a>>;  
+type I2c0ProxyType<'a> = I2cProxy<'a, I2c0MutexBusType<'a>>;  
+
 
 // Display dimensions
 #[cfg(feature = "emdisplay")]
@@ -81,10 +90,10 @@ pub const DISPLAY_H: usize = 240;
 pub const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
 
 
-// type Spi2BusType<'a> = BusManager<NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
-// type Spi2BusType<'a> = Spi<'a, SPI2, FullDuplexMode>;
-// type Spi2ProxyType<'a> = SpiProxy<'a, NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
-type Spi2ProxyType<'a> = Spi<'a, SPI2, FullDuplexMode>;
+type Spi2RawBusType<'a> = Spi<'a, SPI2, FullDuplexMode>;
+type Spi2BusType<'a> = BusManager<SharedBusMutex<Spi2RawBusType<'a>>>; //Spi<'a, SPI2, FullDuplexMode>>>;
+type Spi2ProxyType<'a> = SpiProxy<'a, SharedBusMutex<Spi2RawBusType<'a>>>; //NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
+//type Spi2ProxyType<'a> = Spi<'a, SPI2, FullDuplexMode>;
 
 #[cfg(feature = "sdcard")]
 type SdCardType<'a> = SdCard<Spi2ProxyType<'a>, GpioPin<Output<PushPull>, 39>, Delay>;
@@ -97,10 +106,16 @@ type DisplayType <'a> = Display<
     GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42>
 >;
 
+//static SPI2_BUS: Mutex<RefCell<MaybeUninit<Spi2BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<Spi2BusType>::zeroed()));
+//static I2C0_BUS: Mutex<RefCell<MaybeUninit<I2c0BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<I2c0BusType>::zeroed())); 
+//static I2C0_BUS: MaybeUninit<Arc<I2c0BusWrapper>> = MaybeUninit::<Arc<I2c0BusWrapper>>::zeroed();
+//static I2C0_BUS: Mutex<MaybeUninit<Arc<I2c0BusType>>> = Mutex::new(MaybeUninit::<Arc<I2c0BusType>>::zeroed());
+static mut SPI2_BUS: MaybeUninit<Spi2BusType> = MaybeUninit::<Spi2BusType>::zeroed();
 
 #[global_allocator]
 static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
 
+//TODO no need for dynamic allocation? verify
 fn init_heap() {
     const HEAP_SIZE: usize = 32 * 1024;
     static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
@@ -110,6 +125,12 @@ fn init_heap() {
     }
 }
 
+pub struct I2c0BusWrapper<'a> {  
+  bus: I2c0BusType<'a>,
+  weak_me: Weak<I2c0BusWrapper<'a>>
+}
+
+
 pub struct Board<'a> {
     // peripherals: Peripherals,
     pub timer0: Timer<Timer0<TIMG0>>,
@@ -118,7 +139,7 @@ pub struct Board<'a> {
 
     pub uart0: Uart<'a, UART0>,
     // pub spi2_bus: Spi2BusType<'a>,
-    pub i2c0_bus: I2C<'a, I2C0>,
+    pub i2c0_proxy: I2c0ProxyType<'a>, //I2C<'a, I2C0>,
 
     // Trackball pins
     pub tball_click: GpioPin<Input<PullUp>, 0>,
@@ -137,9 +158,9 @@ pub struct Board<'a> {
 //TODO add feature-flag-wrapped fields
 }
 
-impl Board<'_> {
+impl Board<'static> {
 
-    pub fn new() -> Self {
+    pub fn new() -> Board<'static> {
         let perphs = Peripherals::take();
         let mut system = perphs.SYSTEM.split();
         let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
@@ -175,7 +196,7 @@ impl Board<'_> {
         board_periph_pin.set_high().unwrap();
 
         // Setup 100 kHz i2c0 bus
-        let i2c0_bus = I2C::new(
+        let i2c0_raw = I2C::new(
             perphs.I2C0,
             io.pins.gpio18, //I2C0 SDA
             io.pins.gpio8, //I2C0 SCL
@@ -183,6 +204,17 @@ impl Board<'_> {
             &mut system.peripheral_clock_control,
             &clocks,
         );
+         
+        let i2c0_bus: &'static _ = shared_bus::new_xtensa!(I2c0RawBusType = i2c0_raw).unwrap();
+        let i2c0_proxy = i2c0_bus.acquire_i2c();
+        /*
+        let i2c0_proxy = critical_section::with(|cs| {
+          I2C0_BUS.borrow(cs).write(Arc::new(shared_bus::BusManagerSimple::new(i2c0_raw)));
+          I2C0_BUS.borrow(cs).assume_init().downgrade().acquire_i2c()
+        });
+        */
+         
+
         // TODO setup GT911 capactive touch driver on i2c0 :
         // const GT911_ADDRESS1:u8 =  0x5d;
         // const GT911_ADDRESS2:u8 =  0x14;
@@ -243,9 +275,10 @@ impl Board<'_> {
             &mut system.peripheral_clock_control,
             &clocks,
         );
-        let spi2_bus = spi2_raw;
+        //let spi2_bus = spi2_raw;
         // TODO create a shared_bus so we can share SPI among multiple devices
-        // let spi2_bus = shared_bus::BusManagerSimple::new(spi2_raw);
+        //let spi2_bus = make_static!(shared_bus::BusManagerSimple::new(spi2_raw));
+        let spi2_bus: &'static _ = shared_bus::new_xtensa!(Spi2RawBusType = spi2_raw).unwrap();
 
 
         // TODO setup audio output on   ESP_I2S_BCK, ESP_I2S_WS, ESP_I2S_DOUT;
@@ -264,8 +297,10 @@ impl Board<'_> {
             let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
             let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();//enables backlight?
             tft_enable_pin.set_high().unwrap();
+            let spi2_proxy = spi2_bus.acquire_spi();
+
             // let di = SPIInterfaceNoCS::new(spi2_bus, tdeck_tft_dc);
-            let di = SPIInterface::new(spi2_bus, tdeck_tft_dc, tdeck_tft_cs);
+            let di = SPIInterface::new(spi2_proxy, tdeck_tft_dc, tdeck_tft_cs);
             Builder::st7789(di)
             .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16, )
             .with_orientation(mipidsi::Orientation::Landscape(true))
@@ -283,7 +318,7 @@ impl Board<'_> {
 
             uart0: uart0,
             // spi2_bus: spi2_bus,
-            i2c0_bus: i2c0_bus,
+            i2c0_proxy: i2c0_proxy,
 
             tball_click: tdeck_track_click,
             tball_up: tdeck_track_up,
