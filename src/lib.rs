@@ -58,14 +58,13 @@ use display_interface_spi::{SPIInterface, SPIInterfaceNoCS};
 #[cfg(feature = "emdisplay")]
 use mipidsi::{Builder, Display, models::ST7789};
 
+#[cfg(feature = "sdcard")]
+use embedded_sdmmc::SdCard;
 
 // LoRa info
 #[cfg(feature = "lorawan")]
 use sx126x::{SX126x, conf::Config as LoRaConfig};
 
-// SD-MMC card
-#[cfg(feature = "sdcard")]
-use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
 
 use alloc::rc::{Rc};
 use alloc::sync::{Arc, Weak};
@@ -76,9 +75,9 @@ pub const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
 
 type SharedBusMutex<T>  = XtensaMutex<T>; // was originally NullMutex for BusManagerSimple
 type I2c0RawBusType<'a> = I2C<'a, I2C0>;
-type I2c0MutexBusType<'a> = SharedBusMutex<I2c0RawBusType<'a>>; 
-type I2c0BusType<'a> = BusManager<I2c0MutexBusType<'a>>;  
-type I2c0ProxyType<'a> = I2cProxy<'a, I2c0MutexBusType<'a>>;  
+//type I2c0MutexBusType<'a> = SharedBusMutex<I2c0RawBusType<'a>>; 
+//type I2c0BusType<'a> = BusManager<I2c0MutexBusType<'a>>;  
+type I2c0ProxyType<'a> = I2cProxy<'a, SharedBusMutex<I2c0RawBusType<'a>>>;  
 
 
 // Display dimensions
@@ -91,7 +90,7 @@ pub const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
 
 
 type Spi2RawBusType<'a> = Spi<'a, SPI2, FullDuplexMode>;
-type Spi2BusType<'a> = BusManager<SharedBusMutex<Spi2RawBusType<'a>>>; //Spi<'a, SPI2, FullDuplexMode>>>;
+//type Spi2BusType<'a> = BusManager<SharedBusMutex<Spi2RawBusType<'a>>>; //Spi<'a, SPI2, FullDuplexMode>>>;
 type Spi2ProxyType<'a> = SpiProxy<'a, SharedBusMutex<Spi2RawBusType<'a>>>; //NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
 //type Spi2ProxyType<'a> = Spi<'a, SPI2, FullDuplexMode>;
 
@@ -110,7 +109,7 @@ type DisplayType <'a> = Display<
 //static I2C0_BUS: Mutex<RefCell<MaybeUninit<I2c0BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<I2c0BusType>::zeroed())); 
 //static I2C0_BUS: MaybeUninit<Arc<I2c0BusWrapper>> = MaybeUninit::<Arc<I2c0BusWrapper>>::zeroed();
 //static I2C0_BUS: Mutex<MaybeUninit<Arc<I2c0BusType>>> = Mutex::new(MaybeUninit::<Arc<I2c0BusType>>::zeroed());
-static mut SPI2_BUS: MaybeUninit<Spi2BusType> = MaybeUninit::<Spi2BusType>::zeroed();
+//static mut SPI2_BUS: MaybeUninit<Spi2BusType> = MaybeUninit::<Spi2BusType>::zeroed();
 
 #[global_allocator]
 static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
@@ -123,11 +122,6 @@ fn init_heap() {
     unsafe {
         ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
     }
-}
-
-pub struct I2c0BusWrapper<'a> {  
-  bus: I2c0BusType<'a>,
-  weak_me: Weak<I2c0BusWrapper<'a>>
 }
 
 
@@ -285,11 +279,14 @@ impl Board<'static> {
         // TODO setup ES7210 (analog voice ADC from mic) on i2c0_bus? address ES7210_AD1_AD0_00 = 0x40,
 
         #[cfg(feature = "sdcard")]
-        let sdcard_local = embedded_sdmmc::SdCard::new(weakling1.acquire_spi(), tdeck_sdcard_cs, delay);
-        // println!("sdcard {} bytes", sdcard.num_bytes().unwrap());
-        // let mut log_file_ctx = open_logfile(sdcard,     rtc.get_time_ms() );
-        // log_file_ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
-        // log_file_ctx.volume_mgr.close_file(&log_file_ctx.volume, log_file_ctx.file);
+        let sdcard_local = {
+           let sdcard = embedded_sdmmc::SdCard::new(spi2_bus.acquire_spi(), tdeck_sdcard_cs, delay);
+           println!("sdcard {} bytes", sdcard.num_bytes().unwrap());
+           //let mut log_file_ctx = open_logfile(sdcard,     rtc.get_time_ms() );
+           //log_file_ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
+           //log_file_ctx.volume_mgr.close_file(&log_file_ctx.volume, log_file_ctx.file);
+           sdcard
+        };
 
         // Setup TFT display
         #[cfg(feature = "emdisplay")]
@@ -361,11 +358,13 @@ impl Board<'static> {
 
 //TODO move to sd card library file
 #[cfg(feature = "sdcard")]
-struct FixedTimeSource {
-    base_timestamp: Timestamp,
+pub mod filetime {
+use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
+
+pub struct FixedTimeSource {
+    pub base_timestamp: Timestamp,
 }
 
-#[cfg(feature = "sdcard")]
 impl FixedTimeSource {
     // Timestamp { year_since_1970: 0, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 };
     fn new_with_time_ms(time_ms: u64) -> Self {
@@ -387,7 +386,6 @@ impl FixedTimeSource {
     }
 }
 
-#[cfg(feature = "sdcard")]
 impl TimeSource for FixedTimeSource {
     // #[inline(always)]
     fn get_timestamp(&self) -> Timestamp {
@@ -395,30 +393,27 @@ impl TimeSource for FixedTimeSource {
     }
 }
 
-#[cfg(feature = "sdcard")]
-struct FileContextWrapper<D,T>
+pub struct FileContextWrapper<D,T>
     where
         D: BlockDevice,
         T: TimeSource,
 {
-    volume_mgr: VolumeManager<D,T>,
-    volume: Volume,
-    file: File,
+    pub volume_mgr: VolumeManager<D,T>,
+    pub volume: Volume,
+    pub file: File,
 }
 
-#[cfg(feature = "sdcard")]
 impl<D,T> FileContextWrapper<D,T>
     where
         D: BlockDevice,
         T: TimeSource,
 {
-    fn write(&mut self, bytes: &[u8]) {
+    pub fn write(&mut self, bytes: &[u8]) {
         let _ = self.volume_mgr.write(&mut self.volume, &mut self.file, bytes);
     }
 }
 
-#[cfg(feature = "sdcard")]
-fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrapper<D,FixedTimeSource> {
+pub fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrapper<D,FixedTimeSource> {
     let fake_time_source = FixedTimeSource::new_with_time_ms(timestamp_ms);
     let mut volume_mgr = embedded_sdmmc::VolumeManager::new(sdcard, fake_time_source);
     // Try and access Volume 0 (i.e. the first partition).
@@ -427,7 +422,7 @@ fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrap
     // to every Volume Manager API call. This makes it easier to handle multiple
     // volumes in parallel.
     let mut volume0 = volume_mgr.get_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
-    println!("\r\nVolume 0: {:?}", volume0);
+    //println!("\r\nVolume 0: {:?}", volume0);
     // Open the root directory (passing in the volume we're using).
     let root_dir = volume_mgr.open_root_dir(&volume0).unwrap();
     // Open a file called "MY_FILE.TXT" in the root directory
@@ -442,4 +437,6 @@ fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrap
         volume: volume0,
         file: my_file
     }
+
 }
+} // mod filetime
