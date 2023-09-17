@@ -2,16 +2,15 @@
 #![no_std]
 #![no_main]
 #![feature(const_maybe_uninit_zeroed)]
-
-
 /**
 Copyright (c) 2023 Todd Stellanova, All Rights Reserved
 License: BSD3 (see LICENSE file)
 */
-extern crate alloc;
 
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicPtr, Ordering};
+
+// extern crate alloc;
+// use core::sync::atomic::{AtomicPtr, Ordering};
 //use core::cell::RefCell;
 //use critical_section::Mutex;
 
@@ -66,8 +65,8 @@ use embedded_sdmmc::SdCard;
 use sx126x::{SX126x, conf::Config as LoRaConfig};
 
 
-use alloc::rc::{Rc};
-use alloc::sync::{Arc, Weak};
+// use alloc::rc::{Rc};
+// use alloc::sync::{Arc, Weak};
 // use alloc::boxed::Box;
 
 
@@ -111,18 +110,18 @@ type DisplayType <'a> = Display<
 //static I2C0_BUS: Mutex<MaybeUninit<Arc<I2c0BusType>>> = Mutex::new(MaybeUninit::<Arc<I2c0BusType>>::zeroed());
 //static mut SPI2_BUS: MaybeUninit<Spi2BusType> = MaybeUninit::<Spi2BusType>::zeroed();
 
-#[global_allocator]
-static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+// #[global_allocator]
+// static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
 
 //TODO no need for dynamic allocation? verify
-fn init_heap() {
-    const HEAP_SIZE: usize = 32 * 1024;
-    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
-
-    unsafe {
-        ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
-    }
-}
+// fn init_heap() {
+//     const HEAP_SIZE: usize = 32 * 1024;
+//     static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
+//
+//     unsafe {
+//         ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
+//     }
+// }
 
 
 pub struct Board<'a> {
@@ -130,6 +129,7 @@ pub struct Board<'a> {
     pub timer0: Timer<Timer0<TIMG0>>,
     pub board_periph_pin: GpioPin<Output<PushPull>, 10>,
     pub delay_source: Delay,
+    pub rtc: Rtc<'a>, // real time clock
 
     pub uart0: Uart<'a, UART0>,
     // pub spi2_bus: Spi2BusType<'a>,
@@ -180,8 +180,8 @@ impl Board<'static> {
         wdt0.disable();
         wdt1.disable();
 
-        println!("Start setup");
-        init_heap();
+        println!("Start setupr\r\n\r\n");
+        // init_heap();
 
         let io = IO::new(perphs.GPIO, perphs.IO_MUX);
         let mut delay = Delay::new(&clocks);
@@ -201,13 +201,6 @@ impl Board<'static> {
          
         let i2c0_bus: &'static _ = shared_bus::new_xtensa!(I2c0RawBusType = i2c0_raw).unwrap();
         let i2c0_proxy = i2c0_bus.acquire_i2c();
-        /*
-        let i2c0_proxy = critical_section::with(|cs| {
-          I2C0_BUS.borrow(cs).write(Arc::new(shared_bus::BusManagerSimple::new(i2c0_raw)));
-          I2C0_BUS.borrow(cs).assume_init().downgrade().acquire_i2c()
-        });
-        */
-         
 
         // TODO setup GT911 capactive touch driver on i2c0 :
         // const GT911_ADDRESS1:u8 =  0x5d;
@@ -282,9 +275,6 @@ impl Board<'static> {
         let sdcard_local = {
            let sdcard = embedded_sdmmc::SdCard::new(spi2_bus.acquire_spi(), tdeck_sdcard_cs, delay);
            println!("sdcard {} bytes", sdcard.num_bytes().unwrap());
-           //let mut log_file_ctx = open_logfile(sdcard,     rtc.get_time_ms() );
-           //log_file_ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
-           //log_file_ctx.volume_mgr.close_file(&log_file_ctx.volume, log_file_ctx.file);
            sdcard
         };
 
@@ -307,16 +297,13 @@ impl Board<'static> {
             .unwrap()
         };
 
-
         Board {
             timer0: timer0,
             board_periph_pin: board_periph_pin,
             delay_source: delay,
-
+            rtc,
             uart0: uart0,
-            // spi2_bus: spi2_bus,
             i2c0_proxy: i2c0_proxy,
-
             tball_click: tdeck_track_click,
             tball_up: tdeck_track_up,
             tball_right: tdeck_track_right,
@@ -358,85 +345,85 @@ impl Board<'static> {
 
 //TODO move to sd card library file
 #[cfg(feature = "sdcard")]
-pub mod filetime {
-use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
+pub mod sdcard_utils {
+    use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
+    use crate::{Delay, SdCardType};
 
-pub struct FixedTimeSource {
-    pub base_timestamp: Timestamp,
-}
+    pub type FileContextType<'a> = FileContextWrapper<SdCardType<'a>, FixedTimeSource>;
 
-impl FixedTimeSource {
-    // Timestamp { year_since_1970: 0, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 };
-    fn new_with_time_ms(time_ms: u64) -> Self {
-        let seconds = time_ms / 1000;
-        let minutes = seconds / 60;
-        let hours =  minutes / 60;
+    pub struct FixedTimeSource {
+        pub base_timestamp: Timestamp,
+    }
 
-        return FixedTimeSource {
-            base_timestamp: Timestamp {
-                year_since_1970: 53,
-                zero_indexed_month: 8,
-                zero_indexed_day: 2,
-                hours: (hours % 24) as u8,
-                minutes: (minutes % 60) as u8,
-                seconds: (seconds % 60) as u8
+    impl FixedTimeSource {
+        // Timestamp { year_since_1970: 0, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 };
+        fn new_with_time_ms(time_ms: u64) -> Self {
+            let seconds = time_ms / 1000;
+            let minutes = seconds / 60;
+            let hours =  minutes / 60;
+            return FixedTimeSource {
+                base_timestamp: Timestamp {
+                    year_since_1970: 53,
+                    zero_indexed_month: 8,
+                    zero_indexed_day: 2,
+                    hours: (hours % 24) as u8,
+                    minutes: (minutes % 60) as u8,
+                    seconds: (seconds % 60) as u8
+                }
             }
-
         }
     }
-}
 
-impl TimeSource for FixedTimeSource {
-    // #[inline(always)]
-    fn get_timestamp(&self) -> Timestamp {
-        return self.base_timestamp;
-    }
-}
-
-pub struct FileContextWrapper<D,T>
-    where
-        D: BlockDevice,
-        T: TimeSource,
-{
-    pub volume_mgr: VolumeManager<D,T>,
-    pub volume: Volume,
-    pub file: File,
-}
-
-impl<D,T> FileContextWrapper<D,T>
-    where
-        D: BlockDevice,
-        T: TimeSource,
-{
-    pub fn write(&mut self, bytes: &[u8]) {
-        let _ = self.volume_mgr.write(&mut self.volume, &mut self.file, bytes);
-    }
-}
-
-pub fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrapper<D,FixedTimeSource> {
-    let fake_time_source = FixedTimeSource::new_with_time_ms(timestamp_ms);
-    let mut volume_mgr = embedded_sdmmc::VolumeManager::new(sdcard, fake_time_source);
-    // Try and access Volume 0 (i.e. the first partition).
-    // The volume object holds information about the filesystem on that volume.
-    // It doesn't hold a reference to the Volume Manager and so must be passed back
-    // to every Volume Manager API call. This makes it easier to handle multiple
-    // volumes in parallel.
-    let mut volume0 = volume_mgr.get_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
-    //println!("\r\nVolume 0: {:?}", volume0);
-    // Open the root directory (passing in the volume we're using).
-    let root_dir = volume_mgr.open_root_dir(&volume0).unwrap();
-    // Open a file called "MY_FILE.TXT" in the root directory
-    let my_file = volume_mgr.open_file_in_dir(
-        &mut volume0,
-        &root_dir,
-        "LOG.TXT",
-        embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
-    ).unwrap();
-    return FileContextWrapper {
-        volume_mgr,
-        volume: volume0,
-        file: my_file
+    impl TimeSource for FixedTimeSource {
+        // #[inline(always)]
+        fn get_timestamp(&self) -> Timestamp {
+            return self.base_timestamp;
+        }
     }
 
-}
+    pub struct FileContextWrapper<D,T>
+        where
+            D: BlockDevice,
+            T: TimeSource,
+    {
+        pub volume_mgr: VolumeManager<D,T>,
+        pub volume: Volume,
+        pub file: File,
+    }
+
+    impl<D,T> FileContextWrapper<D,T>
+        where
+            D: BlockDevice,
+            T: TimeSource,
+    {
+        pub fn write(&mut self, bytes: &[u8]) {
+            let _ = self.volume_mgr.write(&mut self.volume, &mut self.file, bytes);
+        }
+    }
+
+    pub fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrapper<D,FixedTimeSource> {
+        let fake_time_source = FixedTimeSource::new_with_time_ms(timestamp_ms);
+        let mut volume_mgr = embedded_sdmmc::VolumeManager::new(sdcard, fake_time_source);
+        // Try and access Volume 0 (i.e. the first partition).
+        // The volume object holds information about the filesystem on that volume.
+        // It doesn't hold a reference to the Volume Manager and so must be passed back
+        // to every Volume Manager API call. This makes it easier to handle multiple
+        // volumes in parallel.
+        let mut volume0 = volume_mgr.get_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
+        //println!("\r\nVolume 0: {:?}", volume0);
+        // Open the root directory (passing in the volume we're using).
+        let root_dir = volume_mgr.open_root_dir(&volume0).unwrap();
+        // Open a file called "MY_FILE.TXT" in the root directory
+        let my_file = volume_mgr.open_file_in_dir(
+            &mut volume0,
+            &root_dir,
+            "LOG.TXT",
+            embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
+        ).unwrap();
+        return FileContextWrapper {
+            volume_mgr,
+            volume: volume0,
+            file: my_file
+        }
+    }
 } // mod filetime

@@ -29,7 +29,9 @@ use embedded_graphics::{
 use nb::block;
 use esp_backtrace as _;
 use esp_println::println;
-use tweedeck::{Board, LILYGO_KB_I2C_ADDRESS, DISPLAY_SIZE};
+use tweedeck::{Board, LILYGO_KB_I2C_ADDRESS, DISPLAY_SIZE,
+               sdcard_utils::{self, FileContextType},
+};
 
 const OUT_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, (DISPLAY_SIZE.height*5)/6);
 const IN_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, DISPLAY_SIZE.height/6);
@@ -81,6 +83,17 @@ fn update_cursor_position( x_idx: &mut u32, y_idx: &mut u32, max_x_idx: u32, max
 fn main() -> ! {
     let mut board = Board::new();
 
+    //setup a log file
+    #[cfg(feature = "sdcard")]
+        let mut log_ctx = {
+                //TODO board.sdcard may be None if the card isn't inserted?
+                let mut ctx =
+                    sdcard_utils::open_logfile(board.sdcard.unwrap(), board.rtc.get_time_ms() );
+                ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
+                // ctx.volume_mgr.close_file(&log_ctx.volume, log_ctx.file);
+                ctx
+        };
+
     // Draw a box around the total display  area
     let box_style = PrimitiveStyleBuilder::new()
         .stroke_color(Rgb565::YELLOW)
@@ -128,7 +141,7 @@ fn main() -> ! {
     let mut input_x_idx: u32 = 0;
     let mut input_y_idx: u32 = 0;
 
-
+    //create a reusable 50 ms timer
     board.timer0.start(50u64.millis());
     loop {
         let mut rbuf:[u8;1] = [0u8];
@@ -136,7 +149,6 @@ fn main() -> ! {
 
         // read from the serial port UART0 and display
         {
-            // let mut read_count = 0;
             if let Ok(rb) = board.uart0.read() {
                 action_count += 1;
                 let eol =  rb == 0x0d;
@@ -163,7 +175,7 @@ fn main() -> ! {
 
         //read from the T-Keyboard via i2c and send data to correspondent via uart
         {
-            let kb_res = board.i2c0_bus.read(LILYGO_KB_I2C_ADDRESS, &mut rbuf);
+            let kb_res = board.i2c0_proxy.read(LILYGO_KB_I2C_ADDRESS, &mut rbuf);
             match kb_res {
                 Ok(..) => {
                     if 0 != rbuf[0] {
@@ -179,6 +191,9 @@ fn main() -> ! {
                             .unwrap();
                         update_cursor_position(&mut input_x_idx, &mut input_y_idx, MAX_IN_X_IDX, MAX_IN_Y_IDX, eol);
                         let _ = board.uart0.write_bytes(&rbuf);
+                        #[cfg(feature = "sdcard")]
+                        log_ctx.write(&rbuf);
+
                         if eol {
                             //tack on a linefeed
                             rbuf[0] = 0x0a;
@@ -200,7 +215,11 @@ fn main() -> ! {
             block!(board.timer0.wait()).unwrap();
         }
 
+        // on exit or whatever:
+        // log_ctx.volume_mgr.close_file(&log_ctx.volume, log_ctx.file);
+
     }
+
 
 
 }
