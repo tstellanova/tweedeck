@@ -13,7 +13,7 @@ use core::mem::MaybeUninit;
 // use core::sync::atomic::{AtomicPtr, Ordering};
 //use core::cell::RefCell;
 //use critical_section::Mutex;
-
+pub use xtensa_lx::{singleton};
 
 use esp32s3_hal as hal;
 
@@ -21,12 +21,15 @@ use esp32s3_hal as hal;
 use esp_println::println;
 use hal::{
     prelude::*,
-    gpio::{GpioPin, Output, OutputPin, Input, PullUp, PushPull},
-    Delay,
+    gpio::{self, GpioPin, Output, OutputPin, Input, PullUp, PushPull},
     clock::ClockControl,
+    Delay,
+    dma::{DmaPriority, I2s0Peripheral},
+    gdma::{self, Gdma},
     i2c::I2C,
+    i2s::{self, DataFormat, I2s, I2s0New, I2sWriteDma, I2sWriteDmaTransfer, MclkPin, NoMclk, PinsBclkWsDout, Standard},
     IO,
-    peripherals::{Peripherals, I2C0, SPI2, TIMG0, UART0},
+    peripherals::{ Peripherals, I2C0, SPI2, TIMG0, UART0},
     timer::{Timer0, TimerGroup},
     Rtc,
     spi::{Spi, SpiMode, FullDuplexMode},
@@ -104,11 +107,23 @@ type DisplayType <'a> = Display<
     GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42>
 >;
 
-//static SPI2_BUS: Mutex<RefCell<MaybeUninit<Spi2BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<Spi2BusType>::zeroed()));
-//static I2C0_BUS: Mutex<RefCell<MaybeUninit<I2c0BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<I2c0BusType>::zeroed())); 
-//static I2C0_BUS: MaybeUninit<Arc<I2c0BusWrapper>> = MaybeUninit::<Arc<I2c0BusWrapper>>::zeroed();
-//static I2C0_BUS: Mutex<MaybeUninit<Arc<I2c0BusType>>> = Mutex::new(MaybeUninit::<Arc<I2c0BusType>>::zeroed());
-//static mut SPI2_BUS: MaybeUninit<Spi2BusType> = MaybeUninit::<Spi2BusType>::zeroed();
+// #[cfg(feature = "audio_out")]
+type AudioOutBuf = [u8; 32000];
+// #[cfg(feature = "audio_out")]
+type AudioOutDataTransfer<'a> =
+I2sTx<'a, i2s::private::I2sPeripheral0,
+    PinsBclkWsDout<'_, GpioPin<gpio::Unknown, 7>,
+        GpioPin<gpio::Unknown, 5>,
+        GpioPin<gpio::Unknown, 6>>,
+    gdma::Channel0>;
+
+// I2sWriteDmaTransfer<'a,
+//     dyn I2s0Peripheral,
+//     // <Peripherals as I2s0Instance>::I2s0 ,  //i2s::private::I2sPeripheral0,
+//     PinsBclkWsDout<'a, GpioPin<gpio::Unknown, 7>, GpioPin<gpio::Unknown, 5>, GpioPin<gpio::Unknown, 6>>,
+//     gdma::Channel0,
+//     &'a mut AudioOutBuf,
+// >;
 
 // #[global_allocator]
 // static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
@@ -125,7 +140,6 @@ type DisplayType <'a> = Display<
 
 
 pub struct Board<'a> {
-    // peripherals: Peripherals,
     pub timer0: Timer<Timer0<TIMG0>>,
     pub board_periph_pin: GpioPin<Output<PushPull>, 10>,
     pub delay_source: Delay,
@@ -148,6 +162,8 @@ pub struct Board<'a> {
     #[cfg(feature = "emdisplay")]
     pub display: DisplayType<'a>,
 
+    #[cfg(feature ="audio_out")]
+    pub audio_out: AudioOutDataTransfer<'a>,
 
 //TODO add feature-flag-wrapped fields
 }
@@ -201,6 +217,40 @@ impl Board<'static> {
          
         let i2c0_bus: &'static _ = shared_bus::new_xtensa!(I2c0RawBusType = i2c0_raw).unwrap();
         let i2c0_proxy = i2c0_bus.acquire_i2c();
+
+        #[cfg(feature = "audio_out")]
+            let audio_out = {
+                // TODO setup audio output on i2s (to MAX98357A )
+                let dma = Gdma::new(perphs.DMA, &mut system.peripheral_clock_control);
+                let dma_channel = dma.channel0;
+                let mut tx_descriptors = [0u32; 20 * 3];
+                let mut rx_descriptors = [0u32; 8 * 3];
+
+                let i2s0 = I2s::new(
+                    perphs.I2S0,
+                    NoMclk {}, //MclkPin::new(io.pins.gpio4), //TODO doesn't appear to be an Mclk pin
+                    Standard::Philips,
+                    DataFormat::Data16Channel16,
+                    44100u32.Hz(),
+                    dma_channel.configure(
+                        false,
+                        &mut tx_descriptors,
+                        &mut rx_descriptors,
+                        DmaPriority::Priority0,
+                    ),
+                    &mut system.peripheral_clock_control,
+                    &clocks,
+                );
+
+                let i2s_tx = i2s0.i2s_tx.with_pins(PinsBclkWsDout::new(
+                    io.pins.gpio7,// ESP_I2S_BCK IO7
+                    io.pins.gpio5,// ESP_I2S_WS IO5
+                    io.pins.gpio6,// ESP_I2S_DA IO6
+                ));
+                i2s_tx
+                // let AUDIO_BUF: &'static mut AudioOutBuf = singleton!(: AudioOutBuf = [0u8; 32000]).unwrap();
+                // i2s_tx.write_dma_circular(AUDIO_BUF).unwrap()
+            };
 
         // TODO setup GT911 capactive touch driver on i2c0 :
         // const GT911_ADDRESS1:u8 =  0x5d;
@@ -268,9 +318,9 @@ impl Board<'static> {
         let spi2_bus: &'static _ = shared_bus::new_xtensa!(Spi2RawBusType = spi2_raw).unwrap();
 
 
-        // TODO setup audio output on   ESP_I2S_BCK, ESP_I2S_WS, ESP_I2S_DOUT;
         // TODO setup ES7210 (analog voice ADC from mic) on i2c0_bus? address ES7210_AD1_AD0_00 = 0x40,
 
+        // TODO setup LoRa device on spi2
         #[cfg(feature = "sdcard")]
         let sdcard_local = {
            let sdcard = embedded_sdmmc::SdCard::new(spi2_bus.acquire_spi(), tdeck_sdcard_cs, delay);
@@ -313,33 +363,12 @@ impl Board<'static> {
             display: gfx_display,
             #[cfg(feature = "sdcard")]
             sdcard: Some(sdcard_local),
+            #[cfg(feature ="audio_out")]
+            audio_out
         }
 
-
     }
-//TODO setup i2s audio output
-// fn setup_audio_output() {
-    // I2S audio output on MAX98357A
-    // let tdeck_i2s_bck = io.pins.gpio7; //ESP_I2S_BCK
-    // let tdeck_i2s_ws = io.pins.gpio5; //ESP_I2S_WS
-    // let tdeck_i2c_da = io.pins.gpio6; //ESP_I2S_DA (DOUT)
 
-//     let i2s = I2s::new(
-//         peripherals.I2S0,
-//         MclkPin::new(io.pins.gpio4),
-//         Standard::Philips,
-//         DataFormat::Data16Channel16,
-//         44100u32.Hz(),
-//         dma_channel.configure(
-//             false,
-//             &mut tx_descriptors,
-//             &mut rx_descriptors,
-//             DmaPriority::Priority0,
-//         ),
-//         &mut system.peripheral_clock_control,
-//         &clocks,
-//     );
-// }
 }
 
 

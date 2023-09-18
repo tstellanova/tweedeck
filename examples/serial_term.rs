@@ -30,7 +30,7 @@ use nb::block;
 use esp_backtrace as _;
 use esp_println::println;
 use tweedeck::{Board, LILYGO_KB_I2C_ADDRESS, DISPLAY_SIZE,
-               sdcard_utils::{self, FileContextType},
+               sdcard_utils::{self},
 };
 
 const OUT_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, (DISPLAY_SIZE.height*5)/6);
@@ -213,6 +213,13 @@ fn main() -> ! {
 
         if 0 == action_count {
             block!(board.timer0.wait()).unwrap();
+        }
+        else {
+            #[cfg(feature ="audio_out")]
+                {
+                    board.audio_out.put(0);
+                }
+
         }
 
         // on exit or whatever:

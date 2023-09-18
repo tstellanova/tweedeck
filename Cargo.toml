@@ -10,6 +10,8 @@ license = "BSD3"
 emdisplay = []
 # enable sdcard support
 sdcard = []
+# enable audio-out support
+audio_out = []
 # enable lorawan support
 lorawan = []
 
@@ -18,7 +20,8 @@ lorawan = []
 esp32s3-hal = { version = "0.11.0" }
 esp-backtrace = { version = "0.7.0", features = ["esp32s3", "panic-handler", "exception-handler", "print-uart"] }
 esp-println       = { version = "0.5.0", features = ["esp32s3"] }
-esp-alloc = { version = "0.3.0" }
+#esp-alloc = { version = "0.3.0" }
+xtensa-lx = "0.8.0"
 #critical-section  = "1.1.2"
 mipidsi = "0.7.1"
 embedded-graphics = "0.8.1"
