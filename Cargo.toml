@@ -27,7 +27,13 @@ display-interface-spi = "0.4.1"
 #embedded-graphics-framebuf = "0.5.0"
 #sx126x = "0.1.1"
 embedded-sdmmc = "0.5.0"
-#shared-bus = "0.3.0"
+#shared-bus = { version="0.3.0" , features = ["xtensa"] }
+#shared-bus = { path="../shared-bus" , features = ["xtensa"] }
+shared-bus = { git = "https://github.com/tstellanova/shared-bus", branch = "wip_xtensa_fun", features = ["xtensa"] }
+
+
+#critical-section = { version = "1.1.2"  }
+#portable-atomic = { version = "1.4", default-features = false, features = ["require-cas"] }
 #static-rc = "0.6.1"
 #lazy_static = "1.4.0"
 #atomic_ref = "0.2.1"

@@ -1,16 +1,18 @@
 #![allow(unused_imports)]
 #![no_std]
 #![no_main]
-
-
-
+#![feature(const_maybe_uninit_zeroed)]
 /**
 Copyright (c) 2023 Todd Stellanova, All Rights Reserved
 License: BSD3 (see LICENSE file)
 */
-extern crate alloc;
 
 use core::mem::MaybeUninit;
+
+// extern crate alloc;
+// use core::sync::atomic::{AtomicPtr, Ordering};
+//use core::cell::RefCell;
+//use critical_section::Mutex;
 
 
 use esp32s3_hal as hal;
@@ -34,7 +36,7 @@ use hal::{
 };
 
 
-// use shared_bus::{BusManager, BusManagerSimple, NullMutex, SpiProxy};
+use shared_bus::{BusManager, BusManagerSimple, NullMutex, I2cProxy, SpiProxy, XtensaMutex};
 
 
 #[cfg(feature = "emdisplay")]
@@ -55,22 +57,27 @@ use display_interface_spi::{SPIInterface, SPIInterfaceNoCS};
 #[cfg(feature = "emdisplay")]
 use mipidsi::{Builder, Display, models::ST7789};
 
+#[cfg(feature = "sdcard")]
+use embedded_sdmmc::SdCard;
 
 // LoRa info
 #[cfg(feature = "lorawan")]
 use sx126x::{SX126x, conf::Config as LoRaConfig};
 
-// SD-MMC card
-#[cfg(feature = "sdcard")]
-use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
 
-
-// use alloc::sync::{Arc};
+// use alloc::rc::{Rc};
+// use alloc::sync::{Arc, Weak};
 // use alloc::boxed::Box;
-// use atomic_ref::AtomicRef;
 
 
 pub const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
+
+type SharedBusMutex<T>  = XtensaMutex<T>; // was originally NullMutex for BusManagerSimple
+type I2c0RawBusType<'a> = I2C<'a, I2C0>;
+//type I2c0MutexBusType<'a> = SharedBusMutex<I2c0RawBusType<'a>>; 
+//type I2c0BusType<'a> = BusManager<I2c0MutexBusType<'a>>;  
+type I2c0ProxyType<'a> = I2cProxy<'a, SharedBusMutex<I2c0RawBusType<'a>>>;  
+
 
 // Display dimensions
 #[cfg(feature = "emdisplay")]
@@ -81,10 +88,10 @@ pub const DISPLAY_H: usize = 240;
 pub const DISPLAY_SIZE: Size = Size::new(DISPLAY_W as u32, DISPLAY_H as u32);
 
 
-// type Spi2BusType<'a> = BusManager<NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
-// type Spi2BusType<'a> = Spi<'a, SPI2, FullDuplexMode>;
-// type Spi2ProxyType<'a> = SpiProxy<'a, NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
-type Spi2ProxyType<'a> = Spi<'a, SPI2, FullDuplexMode>;
+type Spi2RawBusType<'a> = Spi<'a, SPI2, FullDuplexMode>;
+//type Spi2BusType<'a> = BusManager<SharedBusMutex<Spi2RawBusType<'a>>>; //Spi<'a, SPI2, FullDuplexMode>>>;
+type Spi2ProxyType<'a> = SpiProxy<'a, SharedBusMutex<Spi2RawBusType<'a>>>; //NullMutex<Spi<'a, SPI2, FullDuplexMode>>>;
+//type Spi2ProxyType<'a> = Spi<'a, SPI2, FullDuplexMode>;
 
 #[cfg(feature = "sdcard")]
 type SdCardType<'a> = SdCard<Spi2ProxyType<'a>, GpioPin<Output<PushPull>, 39>, Delay>;
@@ -97,28 +104,36 @@ type DisplayType <'a> = Display<
     GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42>
 >;
 
+//static SPI2_BUS: Mutex<RefCell<MaybeUninit<Spi2BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<Spi2BusType>::zeroed()));
+//static I2C0_BUS: Mutex<RefCell<MaybeUninit<I2c0BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<I2c0BusType>::zeroed())); 
+//static I2C0_BUS: MaybeUninit<Arc<I2c0BusWrapper>> = MaybeUninit::<Arc<I2c0BusWrapper>>::zeroed();
+//static I2C0_BUS: Mutex<MaybeUninit<Arc<I2c0BusType>>> = Mutex::new(MaybeUninit::<Arc<I2c0BusType>>::zeroed());
+//static mut SPI2_BUS: MaybeUninit<Spi2BusType> = MaybeUninit::<Spi2BusType>::zeroed();
 
-#[global_allocator]
-static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+// #[global_allocator]
+// static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
 
-fn init_heap() {
-    const HEAP_SIZE: usize = 32 * 1024;
-    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
+//TODO no need for dynamic allocation? verify
+// fn init_heap() {
+//     const HEAP_SIZE: usize = 32 * 1024;
+//     static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
+//
+//     unsafe {
+//         ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
+//     }
+// }
 
-    unsafe {
-        ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
-    }
-}
 
 pub struct Board<'a> {
     // peripherals: Peripherals,
     pub timer0: Timer<Timer0<TIMG0>>,
     pub board_periph_pin: GpioPin<Output<PushPull>, 10>,
     pub delay_source: Delay,
+    pub rtc: Rtc<'a>, // real time clock
 
     pub uart0: Uart<'a, UART0>,
     // pub spi2_bus: Spi2BusType<'a>,
-    pub i2c0_bus: I2C<'a, I2C0>,
+    pub i2c0_proxy: I2c0ProxyType<'a>, //I2C<'a, I2C0>,
 
     // Trackball pins
     pub tball_click: GpioPin<Input<PullUp>, 0>,
@@ -137,9 +152,9 @@ pub struct Board<'a> {
 //TODO add feature-flag-wrapped fields
 }
 
-impl Board<'_> {
+impl Board<'static> {
 
-    pub fn new() -> Self {
+    pub fn new() -> Board<'static> {
         let perphs = Peripherals::take();
         let mut system = perphs.SYSTEM.split();
         let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
@@ -165,8 +180,8 @@ impl Board<'_> {
         wdt0.disable();
         wdt1.disable();
 
-        println!("Start setup");
-        init_heap();
+        println!("Start setupr\r\n\r\n");
+        // init_heap();
 
         let io = IO::new(perphs.GPIO, perphs.IO_MUX);
         let mut delay = Delay::new(&clocks);
@@ -175,7 +190,7 @@ impl Board<'_> {
         board_periph_pin.set_high().unwrap();
 
         // Setup 100 kHz i2c0 bus
-        let i2c0_bus = I2C::new(
+        let i2c0_raw = I2C::new(
             perphs.I2C0,
             io.pins.gpio18, //I2C0 SDA
             io.pins.gpio8, //I2C0 SCL
@@ -183,6 +198,10 @@ impl Board<'_> {
             &mut system.peripheral_clock_control,
             &clocks,
         );
+         
+        let i2c0_bus: &'static _ = shared_bus::new_xtensa!(I2c0RawBusType = i2c0_raw).unwrap();
+        let i2c0_proxy = i2c0_bus.acquire_i2c();
+
         // TODO setup GT911 capactive touch driver on i2c0 :
         // const GT911_ADDRESS1:u8 =  0x5d;
         // const GT911_ADDRESS2:u8 =  0x14;
@@ -243,20 +262,21 @@ impl Board<'_> {
             &mut system.peripheral_clock_control,
             &clocks,
         );
-        let spi2_bus = spi2_raw;
+        //let spi2_bus = spi2_raw;
         // TODO create a shared_bus so we can share SPI among multiple devices
-        // let spi2_bus = shared_bus::BusManagerSimple::new(spi2_raw);
+        //let spi2_bus = make_static!(shared_bus::BusManagerSimple::new(spi2_raw));
+        let spi2_bus: &'static _ = shared_bus::new_xtensa!(Spi2RawBusType = spi2_raw).unwrap();
 
 
         // TODO setup audio output on   ESP_I2S_BCK, ESP_I2S_WS, ESP_I2S_DOUT;
         // TODO setup ES7210 (analog voice ADC from mic) on i2c0_bus? address ES7210_AD1_AD0_00 = 0x40,
 
         #[cfg(feature = "sdcard")]
-        let sdcard_local = embedded_sdmmc::SdCard::new(weakling1.acquire_spi(), tdeck_sdcard_cs, delay);
-        // println!("sdcard {} bytes", sdcard.num_bytes().unwrap());
-        // let mut log_file_ctx = open_logfile(sdcard,     rtc.get_time_ms() );
-        // log_file_ctx.write(&[0x54, 0x53, 0x0d, 0x0a]);
-        // log_file_ctx.volume_mgr.close_file(&log_file_ctx.volume, log_file_ctx.file);
+        let sdcard_local = {
+           let sdcard = embedded_sdmmc::SdCard::new(spi2_bus.acquire_spi(), tdeck_sdcard_cs, delay);
+           println!("sdcard {} bytes", sdcard.num_bytes().unwrap());
+           sdcard
+        };
 
         // Setup TFT display
         #[cfg(feature = "emdisplay")]
@@ -264,8 +284,10 @@ impl Board<'_> {
             let tdeck_tft_dc = io.pins.gpio11.into_push_pull_output();
             let mut tft_enable_pin =  io.pins.gpio42.into_push_pull_output();//enables backlight?
             tft_enable_pin.set_high().unwrap();
+            let spi2_proxy = spi2_bus.acquire_spi();
+
             // let di = SPIInterfaceNoCS::new(spi2_bus, tdeck_tft_dc);
-            let di = SPIInterface::new(spi2_bus, tdeck_tft_dc, tdeck_tft_cs);
+            let di = SPIInterface::new(spi2_proxy, tdeck_tft_dc, tdeck_tft_cs);
             Builder::st7789(di)
             .with_display_size(DISPLAY_H as u16, DISPLAY_W as u16, )
             .with_orientation(mipidsi::Orientation::Landscape(true))
@@ -275,16 +297,13 @@ impl Board<'_> {
             .unwrap()
         };
 
-
         Board {
             timer0: timer0,
             board_periph_pin: board_periph_pin,
             delay_source: delay,
-
+            rtc,
             uart0: uart0,
-            // spi2_bus: spi2_bus,
-            i2c0_bus: i2c0_bus,
-
+            i2c0_proxy: i2c0_proxy,
             tball_click: tdeck_track_click,
             tball_up: tdeck_track_up,
             tball_right: tdeck_track_right,
@@ -326,85 +345,85 @@ impl Board<'_> {
 
 //TODO move to sd card library file
 #[cfg(feature = "sdcard")]
-struct FixedTimeSource {
-    base_timestamp: Timestamp,
-}
+pub mod sdcard_utils {
+    use embedded_sdmmc::{File, TimeSource, SdCard, Timestamp, BlockDevice, VolumeManager, Volume};
+    use crate::{Delay, SdCardType};
 
-#[cfg(feature = "sdcard")]
-impl FixedTimeSource {
-    // Timestamp { year_since_1970: 0, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 };
-    fn new_with_time_ms(time_ms: u64) -> Self {
-        let seconds = time_ms / 1000;
-        let minutes = seconds / 60;
-        let hours =  minutes / 60;
+    pub type FileContextType<'a> = FileContextWrapper<SdCardType<'a>, FixedTimeSource>;
 
-        return FixedTimeSource {
-            base_timestamp: Timestamp {
-                year_since_1970: 53,
-                zero_indexed_month: 8,
-                zero_indexed_day: 2,
-                hours: (hours % 24) as u8,
-                minutes: (minutes % 60) as u8,
-                seconds: (seconds % 60) as u8
+    pub struct FixedTimeSource {
+        pub base_timestamp: Timestamp,
+    }
+
+    impl FixedTimeSource {
+        // Timestamp { year_since_1970: 0, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 };
+        fn new_with_time_ms(time_ms: u64) -> Self {
+            let seconds = time_ms / 1000;
+            let minutes = seconds / 60;
+            let hours =  minutes / 60;
+            return FixedTimeSource {
+                base_timestamp: Timestamp {
+                    year_since_1970: 53,
+                    zero_indexed_month: 8,
+                    zero_indexed_day: 2,
+                    hours: (hours % 24) as u8,
+                    minutes: (minutes % 60) as u8,
+                    seconds: (seconds % 60) as u8
+                }
             }
-
         }
     }
-}
 
-#[cfg(feature = "sdcard")]
-impl TimeSource for FixedTimeSource {
-    // #[inline(always)]
-    fn get_timestamp(&self) -> Timestamp {
-        return self.base_timestamp;
+    impl TimeSource for FixedTimeSource {
+        // #[inline(always)]
+        fn get_timestamp(&self) -> Timestamp {
+            return self.base_timestamp;
+        }
     }
-}
 
-#[cfg(feature = "sdcard")]
-struct FileContextWrapper<D,T>
-    where
-        D: BlockDevice,
-        T: TimeSource,
-{
-    volume_mgr: VolumeManager<D,T>,
-    volume: Volume,
-    file: File,
-}
-
-#[cfg(feature = "sdcard")]
-impl<D,T> FileContextWrapper<D,T>
-    where
-        D: BlockDevice,
-        T: TimeSource,
-{
-    fn write(&mut self, bytes: &[u8]) {
-        let _ = self.volume_mgr.write(&mut self.volume, &mut self.file, bytes);
+    pub struct FileContextWrapper<D,T>
+        where
+            D: BlockDevice,
+            T: TimeSource,
+    {
+        pub volume_mgr: VolumeManager<D,T>,
+        pub volume: Volume,
+        pub file: File,
     }
-}
 
-#[cfg(feature = "sdcard")]
-fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrapper<D,FixedTimeSource> {
-    let fake_time_source = FixedTimeSource::new_with_time_ms(timestamp_ms);
-    let mut volume_mgr = embedded_sdmmc::VolumeManager::new(sdcard, fake_time_source);
-    // Try and access Volume 0 (i.e. the first partition).
-    // The volume object holds information about the filesystem on that volume.
-    // It doesn't hold a reference to the Volume Manager and so must be passed back
-    // to every Volume Manager API call. This makes it easier to handle multiple
-    // volumes in parallel.
-    let mut volume0 = volume_mgr.get_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
-    println!("\r\nVolume 0: {:?}", volume0);
-    // Open the root directory (passing in the volume we're using).
-    let root_dir = volume_mgr.open_root_dir(&volume0).unwrap();
-    // Open a file called "MY_FILE.TXT" in the root directory
-    let my_file = volume_mgr.open_file_in_dir(
-        &mut volume0,
-        &root_dir,
-        "LOG.TXT",
-        embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
-    ).unwrap();
-    return FileContextWrapper {
-        volume_mgr,
-        volume: volume0,
-        file: my_file
+    impl<D,T> FileContextWrapper<D,T>
+        where
+            D: BlockDevice,
+            T: TimeSource,
+    {
+        pub fn write(&mut self, bytes: &[u8]) {
+            let _ = self.volume_mgr.write(&mut self.volume, &mut self.file, bytes);
+        }
     }
-}
+
+    pub fn open_logfile<D: BlockDevice>(sdcard: D, timestamp_ms: u64) -> FileContextWrapper<D,FixedTimeSource> {
+        let fake_time_source = FixedTimeSource::new_with_time_ms(timestamp_ms);
+        let mut volume_mgr = embedded_sdmmc::VolumeManager::new(sdcard, fake_time_source);
+        // Try and access Volume 0 (i.e. the first partition).
+        // The volume object holds information about the filesystem on that volume.
+        // It doesn't hold a reference to the Volume Manager and so must be passed back
+        // to every Volume Manager API call. This makes it easier to handle multiple
+        // volumes in parallel.
+        let mut volume0 = volume_mgr.get_volume(embedded_sdmmc::VolumeIdx(0)).unwrap();
+        //println!("\r\nVolume 0: {:?}", volume0);
+        // Open the root directory (passing in the volume we're using).
+        let root_dir = volume_mgr.open_root_dir(&volume0).unwrap();
+        // Open a file called "MY_FILE.TXT" in the root directory
+        let my_file = volume_mgr.open_file_in_dir(
+            &mut volume0,
+            &root_dir,
+            "LOG.TXT",
+            embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
+        ).unwrap();
+        return FileContextWrapper {
+            volume_mgr,
+            volume: volume0,
+            file: my_file
+        }
+    }
+} // mod filetime
