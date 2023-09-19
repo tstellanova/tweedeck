@@ -27,9 +27,9 @@ use hal::{
     dma::{DmaPriority, I2s0Peripheral},
     gdma::{self, Gdma},
     i2c::I2C,
-    i2s::{self, DataFormat, I2s, I2s0New, I2sWriteDma, I2sWriteDmaTransfer, MclkPin, NoMclk, PinsBclkWsDout, Standard},
+    i2s::{self, DataFormat, I2s, I2s0New, I2sTx, I2sWriteDma, I2sWriteDmaTransfer, MclkPin, NoMclk, PinsBclkWsDout, RegisterAccess, Standard},
     IO,
-    peripherals::{ Peripherals, I2C0, SPI2, TIMG0, UART0},
+    peripherals::{ Peripherals, I2C0, I2S0, SPI2, TIMG0, UART0},
     timer::{Timer0, TimerGroup},
     Rtc,
     spi::{Spi, SpiMode, FullDuplexMode},
@@ -107,23 +107,29 @@ type DisplayType <'a> = Display<
     GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42>
 >;
 
+type AudioOutI2sPins<'a> = PinsBclkWsDout<'a, GpioPin<gpio::Unknown, 7>, GpioPin<gpio::Unknown, 5>, GpioPin<gpio::Unknown, 6>>;
 // #[cfg(feature = "audio_out")]
 type AudioOutBuf = [u8; 32000];
 // #[cfg(feature = "audio_out")]
 type AudioOutDataTransfer<'a> =
-I2sTx<'a, i2s::private::I2sPeripheral0,
-    PinsBclkWsDout<'_, GpioPin<gpio::Unknown, 7>,
-        GpioPin<gpio::Unknown, 5>,
-        GpioPin<gpio::Unknown, 6>>,
-    gdma::Channel0>;
+// I2sTx<'a,
+//         i2s::private::I2sPeripheral0,
+//         AudioOutI2sPins<'a>,
+//         gdma::Channel0
+//     >;
 
-// I2sWriteDmaTransfer<'a,
-//     dyn I2s0Peripheral,
-//     // <Peripherals as I2s0Instance>::I2s0 ,  //i2s::private::I2sPeripheral0,
-//     PinsBclkWsDout<'a, GpioPin<gpio::Unknown, 7>, GpioPin<gpio::Unknown, 5>, GpioPin<gpio::Unknown, 6>>,
-//     gdma::Channel0,
-//     &'a mut AudioOutBuf,
-// >;
+// I2sTx<'a, i2s::private::I2sPeripheral0,
+//     PinsBclkWsDout<'_, GpioPin<gpio::Unknown, 7>,
+//         GpioPin<gpio::Unknown, 5>,
+//         GpioPin<gpio::Unknown, 6>>,
+//     gdma::Channel0>;
+
+I2sWriteDmaTransfer<'a,
+    i2s::private::I2sPeripheral0,  //impl RegisterAccess
+    PinsBclkWsDout<'a, GpioPin<gpio::Unknown, 7>, GpioPin<gpio::Unknown, 5>, GpioPin<gpio::Unknown, 6>>,
+    gdma::Channel0,
+    &'a mut AudioOutBuf,
+>;
 
 // #[global_allocator]
 // static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
@@ -226,7 +232,7 @@ impl Board<'static> {
                 let mut tx_descriptors = [0u32; 20 * 3];
                 let mut rx_descriptors = [0u32; 8 * 3];
 
-                let i2s0 = I2s::new(
+                let i2s0: I2s<'_, I2S0, NoMclk, gdma::Channel0> = I2s::new(
                     perphs.I2S0,
                     NoMclk {}, //MclkPin::new(io.pins.gpio4), //TODO doesn't appear to be an Mclk pin
                     Standard::Philips,
@@ -242,14 +248,13 @@ impl Board<'static> {
                     &clocks,
                 );
 
-                let i2s_tx = i2s0.i2s_tx.with_pins(PinsBclkWsDout::new(
+                let i2s_tx: AudioOutDataTransfer<'_> = i2s0.i2s_tx.with_pins(PinsBclkWsDout::new(
                     io.pins.gpio7,// ESP_I2S_BCK IO7
                     io.pins.gpio5,// ESP_I2S_WS IO5
                     io.pins.gpio6,// ESP_I2S_DA IO6
                 ));
-                i2s_tx
-                // let AUDIO_BUF: &'static mut AudioOutBuf = singleton!(: AudioOutBuf = [0u8; 32000]).unwrap();
-                // i2s_tx.write_dma_circular(AUDIO_BUF).unwrap()
+                let AUDIO_BUF: &'static mut AudioOutBuf = singleton!(: AudioOutBuf = [0u8; 32000]).unwrap();
+                i2s_tx.write_dma_circular(AUDIO_BUF).unwrap()
             };
 
         // TODO setup GT911 capactive touch driver on i2c0 :
