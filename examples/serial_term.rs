@@ -19,19 +19,22 @@ use hal::{
 };
 use embedded_graphics::{
     mono_font::{ascii::{FONT_9X15_BOLD, FONT_8X13_BOLD},
-                MonoFont, MonoTextStyle, MonoTextStyleBuilder},
+                MonoFont, MonoTextStyleBuilder},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Rectangle, PrimitiveStyleBuilder},
-    text::{Text, TextStyle},
+    text::{Text},
 };
 
 use nb::block;
 use esp_backtrace as _;
 use esp_println::println;
 use tweedeck::{Board, LILYGO_KB_I2C_ADDRESS, DISPLAY_SIZE,
-               sdcard_utils::{self, FileContextType},
 };
+
+#[cfg(feature = "sdcard")]
+use tweedeck::sdcard_utils::{self};
+
 
 const OUT_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, (DISPLAY_SIZE.height*5)/6);
 const IN_VIEW_SIZE: Size = Size::new(DISPLAY_SIZE.width, DISPLAY_SIZE.height/6);
@@ -93,6 +96,7 @@ fn main() -> ! {
                 // ctx.volume_mgr.close_file(&log_ctx.volume, log_ctx.file);
                 ctx
         };
+
 
     // Draw a box around the total display  area
     let box_style = PrimitiveStyleBuilder::new()
@@ -209,6 +213,12 @@ fn main() -> ! {
                     println!("kb err: {:?}", _err);
                 }
             }
+        }
+
+        #[cfg(feature = "lorawan")]
+        {
+            board.lora.configure_for_receive(&mut board.delay, 3000);
+           // lora.set_rx(spi1, delay, rx_timeout).unwrap();
         }
 
         if 0 == action_count {

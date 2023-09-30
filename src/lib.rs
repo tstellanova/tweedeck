@@ -21,7 +21,7 @@ use esp32s3_hal as hal;
 use esp_println::println;
 use hal::{
     prelude::*,
-    gpio::{GpioPin, Output, OutputPin, Input, PullUp, PushPull},
+    gpio::{self, Floating, GpioPin, Output, OutputPin, Input, PullUp, PushPull},
     Delay,
     clock::ClockControl,
     i2c::I2C,
@@ -65,10 +65,6 @@ use embedded_sdmmc::SdCard;
 use sx126x::{SX126x, conf::Config as LoRaConfig};
 
 
-// use alloc::rc::{Rc};
-// use alloc::sync::{Arc, Weak};
-// use alloc::boxed::Box;
-
 
 pub const LILYGO_KB_I2C_ADDRESS: u8 =     0x55;
 
@@ -96,6 +92,14 @@ type Spi2ProxyType<'a> = SpiProxy<'a, SharedBusMutex<Spi2RawBusType<'a>>>; //Nul
 #[cfg(feature = "sdcard")]
 type SdCardType<'a> = SdCard<Spi2ProxyType<'a>, GpioPin<Output<PushPull>, 39>, Delay>;
 
+
+#[cfg(feature = "lorawan")]
+type LoraWrapperType<'a> = crate::lora_utils::LoraWrapper<'a>;
+
+
+
+
+
 #[cfg(feature = "emdisplay")]
 type DisplayType <'a> = Display<
     // SPIInterfaceNoCS<Spi2ProxyType<'a>, GpioPin<Output<esp32s3_hal::gpio::PushPull>, 11>>,
@@ -104,31 +108,12 @@ type DisplayType <'a> = Display<
     GpioPin<Output<esp32s3_hal::gpio::PushPull>, 42>
 >;
 
-//static SPI2_BUS: Mutex<RefCell<MaybeUninit<Spi2BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<Spi2BusType>::zeroed()));
-//static I2C0_BUS: Mutex<RefCell<MaybeUninit<I2c0BusType>>> = Mutex::new(RefCell::new(MaybeUninit::<I2c0BusType>::zeroed())); 
-//static I2C0_BUS: MaybeUninit<Arc<I2c0BusWrapper>> = MaybeUninit::<Arc<I2c0BusWrapper>>::zeroed();
-//static I2C0_BUS: Mutex<MaybeUninit<Arc<I2c0BusType>>> = Mutex::new(MaybeUninit::<Arc<I2c0BusType>>::zeroed());
-//static mut SPI2_BUS: MaybeUninit<Spi2BusType> = MaybeUninit::<Spi2BusType>::zeroed();
-
-// #[global_allocator]
-// static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
-
-//TODO no need for dynamic allocation? verify
-// fn init_heap() {
-//     const HEAP_SIZE: usize = 32 * 1024;
-//     static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
-//
-//     unsafe {
-//         ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
-//     }
-// }
-
 
 pub struct Board<'a> {
     // peripherals: Peripherals,
     pub timer0: Timer<Timer0<TIMG0>>,
     pub board_periph_pin: GpioPin<Output<PushPull>, 10>,
-    pub delay_source: Delay,
+    pub delay: Delay,
     pub rtc: Rtc<'a>, // real time clock
 
     pub uart0: Uart<'a, UART0>,
@@ -144,6 +129,9 @@ pub struct Board<'a> {
 
     #[cfg(feature = "sdcard")]
     pub sdcard: Option<SdCardType<'a>>,
+
+    #[cfg(feature = "lorawan")]
+    pub lora: LoraWrapperType<'a>,
 
     #[cfg(feature = "emdisplay")]
     pub display: DisplayType<'a>,
@@ -180,7 +168,7 @@ impl Board<'static> {
         wdt0.disable();
         wdt1.disable();
 
-        println!("Start setupr\r\n\r\n");
+        println!("Start setup\r\n\r\n");
         // init_heap();
 
         let io = IO::new(perphs.GPIO, perphs.IO_MUX);
@@ -278,6 +266,41 @@ impl Board<'static> {
            sdcard
         };
 
+        // TODO radio setup for lorawan
+        #[cfg(feature = "lorawan")]
+        let lora =  {
+            // #define RADIO_FREQ          433.0
+            // SX1262 radio = new Module(RADIO_CS_PIN, RADIO_DIO1_PIN, RADIO_RST_PIN, RADIO_BUSY_PIN);
+
+            let mut lora_nreset = io.pins.gpio17.into_push_pull_output();
+            lora_nreset.set_high().unwrap();
+            // let lora_nss = io.pins.gpio9.into_push_pull_output_with_state(State::High);
+            let lora_busy = io.pins.gpio13.into_floating_input();
+            let lora_fake_ant = io.pins.gpio35.into_push_pull_output(); //No Connection?
+
+            // TODO Configure DIO1 pin as interrupt source and store a reference to it in static
+            let lora_dio1 = io.pins.gpio45.into_floating_input();
+            // lora_dio1.make_interrupt_source(&mut afio);
+            // lora_dio1.trigger_on_edge(&exti, Edge::RISING);
+            // lora_dio1.enable_interrupt(&exti);
+
+            let lora_pins = (
+                tdeck_lora_cs, //RADIO_CS_PIN, // 9
+                lora_nreset, //RADIO_RST_PIN, // 17
+                lora_busy, //RADIO_BUSY_PIN, // 13
+                lora_fake_ant, // lora_ant ???? no antenna switch on tdeck
+                lora_dio1, // RADIO_DIO1_PIN, // 45
+                );
+
+            let mut wrappo = crate::lora_utils::LoraWrapper {
+                radio: SX126x::new(lora_pins),
+                spi_holder: spi2_bus.acquire_spi()
+            };
+            let conf = lora_utils::build_lora_config();
+            wrappo.radio.init(&mut wrappo.spi_holder, &mut delay, conf).unwrap();
+            wrappo
+        };
+
         // Setup TFT display
         #[cfg(feature = "emdisplay")]
         let gfx_display = {
@@ -300,7 +323,7 @@ impl Board<'static> {
         Board {
             timer0: timer0,
             board_periph_pin: board_periph_pin,
-            delay_source: delay,
+            delay,
             rtc,
             uart0: uart0,
             i2c0_proxy: i2c0_proxy,
@@ -311,6 +334,8 @@ impl Board<'static> {
             tball_left: tdeck_track_left,
             #[cfg(feature = "emdisplay")]
             display: gfx_display,
+            #[cfg(feature = "lorawan")]
+            lora,
             #[cfg(feature = "sdcard")]
             sdcard: Some(sdcard_local),
         }
@@ -341,6 +366,7 @@ impl Board<'static> {
 //     );
 // }
 }
+
 
 
 //TODO move to sd card library file
@@ -427,3 +453,80 @@ pub mod sdcard_utils {
         }
     }
 } // mod filetime
+
+#[cfg(feature = "lorawan")]
+pub mod lora_utils {
+    use sx126x::conf::Config as LoRaConfig;
+    use sx126x::op::status::CommandStatus::{CommandTimeout, CommandTxDone, DataAvailable};
+    use sx126x::op::*;
+    use sx126x::SX126x;
+
+    use crate::{Delay, Spi2ProxyType};
+    use crate::hal:: {
+        gpio::{self, Floating, GpioPin, Output, OutputPin, Input, PullUp, PushPull},
+    };
+
+
+    type LoraRadioType<'a> = SX126x<
+        Spi2ProxyType<'a>,
+        GpioPin<Output<PushPull>, 9>,
+        GpioPin<Output<PushPull>, 17>,
+        GpioPin<Input<Floating>, 13>,
+        GpioPin<Output<PushPull>, 35>,
+        GpioPin<Input<Floating>, 45>,
+    >;
+
+    pub struct LoraWrapper<'a> {
+        pub radio: LoraRadioType<'a>,
+        pub(crate) spi_holder: Spi2ProxyType<'a>,
+    }
+
+    impl LoraWrapper<'_>{
+
+        pub fn configure_for_receive(&mut self, delay: &mut Delay, timeout_ms: u32) {
+            let rx_timeout = RxTxTimeout::from_ms(timeout_ms);
+            self.radio.set_rx(&mut self.spi_holder, delay, rx_timeout).unwrap();
+        }
+    }
+
+    pub(crate) fn build_lora_config() -> LoRaConfig {
+        use sx126x::op::{
+            irq::IrqMaskBit::*, modulation::lora::*, packet::lora::LoRaPacketParams,
+            rxtx::DeviceSel::SX1261, PacketType::LoRa,
+        };
+
+        let mod_params = LoraModParams::default().into();
+        let tx_params = TxParams::default()
+            .set_power_dbm(14)
+            .set_ramp_time(RampTime::Ramp200u);
+        let pa_config = PaConfig::default()
+            .set_device_sel(SX1261)
+            .set_pa_duty_cycle(0x04);
+
+        let dio1_irq_mask = IrqMask::none()
+            .combine(TxDone)
+            .combine(Timeout)
+            .combine(RxDone);
+
+        let packet_params = LoRaPacketParams::default().into();
+
+        const F_XTAL: u32 = 32_000_000; // 32MHz
+        const RF_FREQUENCY: u32 = 433_000_000; // 433 MHz
+        let rf_freq = sx126x::calc_rf_freq(433 as f32, F_XTAL as f32);
+
+        LoRaConfig {
+            packet_type: LoRa,
+            sync_word: 0x1424, // Private networks
+            calib_param: CalibParam::from(0x7F),
+            mod_params,
+            tx_params,
+            pa_config,
+            packet_params: Some(packet_params),
+            dio1_irq_mask,
+            dio2_irq_mask: IrqMask::none(),
+            dio3_irq_mask: IrqMask::none(),
+            rf_frequency: RF_FREQUENCY,
+            rf_freq,
+        }
+    }
+}
