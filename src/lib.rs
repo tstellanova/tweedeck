@@ -256,6 +256,8 @@ impl Board<'static> {
         let spi2_bus: &'static _ = shared_bus::new_xtensa!(Spi2RawBusType = spi2_raw).unwrap();
 
 
+        println!("spi2_bus ready\r\n");
+
         // TODO setup audio output on   ESP_I2S_BCK, ESP_I2S_WS, ESP_I2S_DOUT;
         // TODO setup ES7210 (analog voice ADC from mic) on i2c0_bus? address ES7210_AD1_AD0_00 = 0x40,
 
@@ -269,9 +271,6 @@ impl Board<'static> {
         // TODO radio setup for lorawan
         #[cfg(feature = "lorawan")]
         let lora =  {
-            // #define RADIO_FREQ          433.0
-            // SX1262 radio = new Module(RADIO_CS_PIN, RADIO_DIO1_PIN, RADIO_RST_PIN, RADIO_BUSY_PIN);
-
             let mut lora_nreset = io.pins.gpio17.into_push_pull_output();
             lora_nreset.set_high().unwrap();
             // let lora_nss = io.pins.gpio9.into_push_pull_output_with_state(State::High);
@@ -297,7 +296,9 @@ impl Board<'static> {
                 spi_holder: spi2_bus.acquire_spi()
             };
             let conf = lora_utils::build_lora_config();
+            println!("SX126X init...\r\n");
             wrappo.radio.init(&mut wrappo.spi_holder, &mut delay, conf).unwrap();
+            println!("SX126X ready\r\n");
             wrappo
         };
 
@@ -459,6 +460,11 @@ pub mod lora_utils {
     use sx126x::conf::Config as LoRaConfig;
     use sx126x::op::status::CommandStatus::{CommandTimeout, CommandTxDone, DataAvailable};
     use sx126x::op::*;
+    use sx126x::op::DeviceSel::SX1262;
+    use sx126x::op::modulation::lora::LoRaBandWidth::{BW125, BW250};
+    use sx126x::op::modulation::lora::LoraCodingRate::{CR4_5, CR4_6, CR4_8};
+    use sx126x::op::modulation::lora::LoRaSpreadFactor::SF10;
+    use sx126x::op::packet::lora::LoRaHeaderType;
     use sx126x::SX126x;
 
     use crate::{Delay, Spi2ProxyType};
@@ -487,36 +493,111 @@ pub mod lora_utils {
             let rx_timeout = RxTxTimeout::from_ms(timeout_ms);
             self.radio.set_rx(&mut self.spi_holder, delay, rx_timeout).unwrap();
         }
+
+        /**
+        Poll for the amount of receive data available
+        */
+        pub fn rx_bytes_avail(&mut self, delay: &mut Delay) -> usize {
+            let irq_stat = self.radio.get_irq_status(&mut self.spi_holder, delay).unwrap();
+            if irq_stat.rx_done() {
+                let buffer_status = self.radio.get_rx_buffer_status(&mut self.spi_holder, delay).unwrap();
+                let payload_len = buffer_status.payload_length_rx();
+                // self.radio.clear_irq_status(&mut self.spi_holder, delay, IrqMask::all()).unwrap();
+                payload_len as usize
+            }
+            else {
+                0
+            }
+        }
+
+
+        /**
+
+        */
+        pub fn read_payload(&mut self, delay: &mut Delay, rx_buf: &mut [u8], max_read: usize) -> usize {
+            let buffer_status = self.radio.get_rx_buffer_status(&mut self.spi_holder, delay).unwrap();
+            let payload_len = buffer_status.payload_length_rx() as usize;
+            let start_offset = buffer_status.rx_start_buffer_pointer();
+            if !(payload_len > 0) {
+                return 0
+            }
+
+            //println!("read_all {}, {}: \"", start_offset, payload_len).unwrap();
+            // Read the received message in chunks of 32 bytes
+            let mut goal: usize = payload_len as usize;
+            if goal > max_read  { goal = max_read;}
+            self.radio.read_buffer(
+                &mut self.spi_holder,
+                delay,
+                start_offset as u8,
+                &mut rx_buf[..goal]).unwrap();
+
+
+            // let mut out_offset: usize = 0;
+            //
+            // for i in (0..goal).step_by(32) {
+            //     let to_read = (goal - out_offset) % 32;
+            //     self.radio.read_buffer(
+            //         &mut self.spi_holder,
+            //         delay,
+            //         (i + start_offset) as u8,
+            //         &mut rx_buf[out_offset..out_offset+to_read]
+            //         // &mut rx_buf[i..i+32] // TODO wrong at sub-chunk (32) size
+            //     ).unwrap();
+            //     out_offset += 32;
+            // }
+            goal
+
+            // let mut chunk = [0u8; 32];
+            // for i in (0..goal).step_by(chunk.len()) {
+            //     let end = (goal - i).min(chunk.len()) ;
+            //     self.radio.read_buffer(&mut self.spi_holder,
+            //                            delay,
+            //                            (i + start_offset) as u8,
+            //                            &mut chunk[..end])
+            //         .unwrap();
+            // }
+
+        }
     }
 
     pub(crate) fn build_lora_config() -> LoRaConfig {
         use sx126x::op::{
             irq::IrqMaskBit::*, modulation::lora::*, packet::lora::LoRaPacketParams,
-            rxtx::DeviceSel::SX1261, PacketType::LoRa,
+            rxtx::DeviceSel::SX1262, PacketType,
         };
 
-        let mod_params = LoraModParams::default().into();
+        let mod_params = LoraModParams::default()
+            .set_spread_factor(SF10) // 10
+            .set_bandwidth(BW125) // BW250) // 250 kHz
+            // .set_coding_rate(CR4_6) // 6 ?? : Sets LoRa coding rate denominator
+            .into();
+
         let tx_params = TxParams::default()
             .set_power_dbm(14)
             .set_ramp_time(RampTime::Ramp200u);
         let pa_config = PaConfig::default()
-            .set_device_sel(SX1261)
+            .set_device_sel(SX1262)
             .set_pa_duty_cycle(0x04);
 
         let dio1_irq_mask = IrqMask::none()
-            .combine(TxDone)
-            .combine(Timeout)
+            // .combine(TxDone)
+            // .combine(Timeout)
             .combine(RxDone);
 
-        let packet_params = LoRaPacketParams::default().into();
+        let packet_params = LoRaPacketParams::default()
+            // .set_preamble_len(15) // match Arduino unit test example
+            .set_payload_len(64)
+            // .set_header_type(LoRaHeaderType::FixedLen)
+            .into();
 
         const F_XTAL: u32 = 32_000_000; // 32MHz
         const RF_FREQUENCY: u32 = 433_000_000; // 433 MHz
         let rf_freq = sx126x::calc_rf_freq(433 as f32, F_XTAL as f32);
 
         LoRaConfig {
-            packet_type: LoRa,
-            sync_word: 0x1424, // Private networks
+            packet_type: PacketType::LoRa,
+            sync_word: 0xAB, //0x1424, // Private networks // Arduino unit test example uses 0xAB,
             calib_param: CalibParam::from(0x7F),
             mod_params,
             tx_params,
