@@ -8,23 +8,26 @@ License: BSD3 (see LICENSE file)
 */
 
 use core::mem::MaybeUninit;
-
 // extern crate alloc;
-// use core::sync::atomic::{AtomicPtr, Ordering};
-//use core::cell::RefCell;
-//use critical_section::Mutex;
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::cell::RefCell;
+use critical_section::Mutex;
 
 
 use esp32s3_hal as hal;
+
+use embedded_hal::digital::v2;
+use embedded_hal::digital::v2::InputPin;
 
 // debugging
 use esp_println::println;
 use hal::{
     prelude::*,
-    gpio::{self, Floating, GpioPin, Output, OutputPin, Input, PullUp, PushPull},
+    gpio::{self, Event, Floating, Gpio45, GpioPin, Output, OutputPin, Input, PullDown, PullUp, PushPull},
     Delay,
     clock::ClockControl,
     i2c::I2C,
+    interrupt,
     IO,
     peripherals::{Peripherals, I2C0, SPI2, TIMG0, UART0},
     timer::{Timer0, TimerGroup},
@@ -34,7 +37,6 @@ use hal::{
     Uart,
     uart::{TxRxPins, config::*},
 };
-
 
 use shared_bus::{BusManager, BusManagerSimple, NullMutex, I2cProxy, SpiProxy, XtensaMutex};
 
@@ -95,8 +97,12 @@ type SdCardType<'a> = SdCard<Spi2ProxyType<'a>, GpioPin<Output<PushPull>, 39>, D
 
 #[cfg(feature = "lorawan")]
 type LoraWrapperType<'a> = crate::lora_utils::LoraWrapper<'a>;
-
-
+#[cfg(feature = "lorawan")]
+type Dio1PinType = GpioPin<Input<Floating>, 45>;
+#[cfg(feature = "lorawan")]
+static mut DIO1_PIN: MaybeUninit<Dio1PinType> = MaybeUninit::uninit();
+#[cfg(feature = "lorawan")]
+static DIO1_TRIG: AtomicBool = AtomicBool::new(false);
 
 
 
@@ -110,7 +116,6 @@ type DisplayType <'a> = Display<
 
 
 pub struct Board<'a> {
-    // peripherals: Peripherals,
     pub timer0: Timer<Timer0<TIMG0>>,
     pub board_periph_pin: GpioPin<Output<PushPull>, 10>,
     pub delay: Delay,
@@ -142,7 +147,7 @@ pub struct Board<'a> {
 
 impl Board<'static> {
 
-    pub fn new() -> Board<'static> {
+    pub fn default() -> Board<'static> {
         let perphs = Peripherals::take();
         let mut system = perphs.SYSTEM.split();
         let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
@@ -277,11 +282,15 @@ impl Board<'static> {
             let lora_busy = io.pins.gpio13.into_floating_input();
             let lora_fake_ant = io.pins.gpio35.into_push_pull_output(); //No Connection?
 
-            // TODO Configure DIO1 pin as interrupt source and store a reference to it in static
-            let lora_dio1 = io.pins.gpio45.into_floating_input();
-            // lora_dio1.make_interrupt_source(&mut afio);
-            // lora_dio1.trigger_on_edge(&exti, Edge::RISING);
-            // lora_dio1.enable_interrupt(&exti);
+            let mut lora_dio1 = io.pins.gpio45.into_floating_input();
+
+            // let lora_dio1 = unsafe { &mut *DIO1_PIN.as_mut_ptr() };
+            // *lora_dio1 = io.pins.gpio45.into_floating_input();
+            lora_dio1.listen(Event::RisingEdge);
+
+            // Wrap DIO1 pin in Dio1PinRefMut newtype, as mutable refences to
+            // pins do not implement the `embedded_hal::digital::v2::InputPin` trait.
+            //let lora_dio1 = crate::lora_utils::Dio1PinRefMut(lora_dio1);
 
             let lora_pins = (
                 tdeck_lora_cs, //RADIO_CS_PIN, // 9
@@ -297,8 +306,12 @@ impl Board<'static> {
             };
             let conf = lora_utils::build_lora_config();
             println!("SX126X init...\r\n");
-            wrappo.radio.init(&mut wrappo.spi_holder, &mut delay, conf).unwrap();
-            println!("SX126X ready\r\n");
+            let lrs = wrappo.radio.init(&mut wrappo.spi_holder, &mut delay, conf);
+            println!("SX126X init res: {:?}\r\n",lrs);
+
+            // interrupt::enable(
+            //     hal::peripherals::Interrupt::GPIO,
+            //     interrupt::Priority::Priority2).unwrap();
             wrappo
         };
 
@@ -455,23 +468,52 @@ pub mod sdcard_utils {
     }
 } // mod filetime
 
+
+
+
+#[cfg(feature = "lorawan")]
+#[ram]
+#[interrupt]
+fn GPIO() {
+    println!("GPIO interrupt!");
+    // esp_println::println!(
+    //     "GPIO Interrupt with priority {}",
+    //     xtensa_lx::interrupt::get_level()
+    // );
+
+    let dio1_pin = unsafe { &mut *DIO1_PIN.as_mut_ptr() };
+    // Check whether the interrupt was caused by the DIO1 pin
+    if dio1_pin.is_pcore_interrupt_set() {
+        DIO1_TRIG.store(true, Ordering::Relaxed);
+
+        // clear interrupt bit to avoid infinite triggers
+        dio1_pin.clear_interrupt();
+    }
+
+}
+
 #[cfg(feature = "lorawan")]
 pub mod lora_utils {
+    use core::cell::RefCell;
+    use esp_println::println;
     use sx126x::conf::Config as LoRaConfig;
     use sx126x::op::status::CommandStatus::{CommandTimeout, CommandTxDone, DataAvailable};
     use sx126x::op::*;
-    use sx126x::op::DeviceSel::SX1262;
+    use sx126x::op::DeviceSel::{SX1261, SX1262};
     use sx126x::op::modulation::lora::LoRaBandWidth::{BW125, BW250};
     use sx126x::op::modulation::lora::LoraCodingRate::{CR4_5, CR4_6, CR4_8};
     use sx126x::op::modulation::lora::LoRaSpreadFactor::SF10;
-    use sx126x::op::packet::lora::LoRaHeaderType;
+    use sx126x::op::packet::lora::{LoRaCrcType, LoRaHeaderType, LoRaPacketParams};
     use sx126x::SX126x;
 
-    use crate::{Delay, Spi2ProxyType};
-    use crate::hal:: {
-        gpio::{self, Floating, GpioPin, Output, OutputPin, Input, PullUp, PushPull},
-    };
+    use core::sync::atomic::Ordering;
+    use esp32s3_hal::gpio::Pin;
+    use esp32s3_hal::prelude::_embedded_hal_blocking_delay_DelayMs;
 
+    use crate::{DIO1_TRIG, Delay, Spi2ProxyType, Dio1PinType};
+    use crate::hal:: {
+        gpio::{self, Floating, GpioPin, InputPin, Output, OutputPin, Input, PullUp, PushPull},
+    };
 
     type LoraRadioType<'a> = SX126x<
         Spi2ProxyType<'a>,
@@ -487,22 +529,74 @@ pub mod lora_utils {
         pub(crate) spi_holder: Spi2ProxyType<'a>,
     }
 
+
+
     impl LoraWrapper<'_>{
 
-        pub fn configure_for_receive(&mut self, delay: &mut Delay, timeout_ms: u32) {
-            let rx_timeout = RxTxTimeout::from_ms(timeout_ms);
-            self.radio.set_rx(&mut self.spi_holder, delay, rx_timeout).unwrap();
+        pub fn send_test_tx(&mut self, delay: &mut Delay) {
+            let data: [u8; 5] = [0x68, 0x65, 0x6c, 0x6c, 0x6f];
+
+            let _rc = self.radio.write_buffer(&mut self.spi_holder, delay, 0x00, &data);
+            // println!("write_buffer rc: {:?}", _rc);
+
+            // Set packet params
+            let params = LoRaPacketParams::default()
+                .set_preamble_len(15)
+                .set_payload_len(data.len() as u8)
+                .set_crc_type(LoRaCrcType::CrcOff)
+                .into();
+
+            let _rc = self.radio.set_packet_params(&mut self.spi_holder, delay, params);
+            // println!("set_packet_params rc: {:?}", _rc);
+
+            // Set tx mode
+            let _rc = self.radio.set_tx(&mut self.spi_holder, delay, RxTxTimeout::from_ms(1000));
+            println!("set_tx rc: {:?}", _rc);
+
+            delay.delay_ms(255u8);
+            // // Wait for busy line to go low
+            // self.wait_on_busy(delay)?;
+            // // Wait on dio1 going high
+            // self.wait_on_dio1(delay)?;
+            // // Clear IRQ
+            // self.clear_irq_status(spi, delay, IrqMask::all())?;
+            self.radio.clear_irq_status(&mut self.spi_holder, delay, IrqMask::all()).unwrap();
+
+            let _rc = self.radio.wait_on_dio1(delay );
+            println!("dio1_is_high: {} busy_is_high: {}", self.radio.dio1_is_high(), self.radio.busy_is_high());
+
+        }
+
+        pub fn configure_for_receive(&mut self, delay: &mut Delay) {
+            let rx_timeout = RxTxTimeout::from(3000);
+            //RxContinuous mode
+            // let rx_timeout = RxTxTimeout::from(0xFFFFFFFF);
+            let _rc = self.radio.set_rx(&mut self.spi_holder, delay, rx_timeout);
+            println!("set_rx rc {:?}", _rc);
         }
 
         /**
         Poll for the amount of receive data available
         */
         pub fn rx_bytes_avail(&mut self, delay: &mut Delay) -> usize {
+
+            // if self.radio.dio1_pin.is_pcore_interrupt_set() ||
+            //     self.radio.dio1_pin.is_acore_interrupt_set()  {
+            //     println!("interrupt set");
+            //     DIO1_TRIG.store(true, Ordering::Relaxed);
+            //
+            //     // clear interrupt bit to avoid infinite triggers
+            //     self.radio.dio1_pin.clear_interrupt();
+            // }
+
             let irq_stat = self.radio.get_irq_status(&mut self.spi_holder, delay).unwrap();
-            if irq_stat.rx_done() {
+            self.radio.clear_irq_status(&mut self.spi_holder, delay, IrqMask::all()).unwrap();
+            println!("irq_stat: {:?}", irq_stat);
+
+            if irq_stat.syncword_valid() {
+            // if DIO1_TRIG.swap(false, Ordering::Relaxed) {
                 let buffer_status = self.radio.get_rx_buffer_status(&mut self.spi_holder, delay).unwrap();
                 let payload_len = buffer_status.payload_length_rx();
-                // self.radio.clear_irq_status(&mut self.spi_holder, delay, IrqMask::all()).unwrap();
                 payload_len as usize
             }
             else {
@@ -510,54 +604,43 @@ pub mod lora_utils {
             }
         }
 
+        pub fn get_snr(&mut self, delay: &mut Delay) -> u8 {
+            let status: PacketStatus = self.radio.get_rx_packet_status(&mut self.spi_holder, delay).unwrap();
+            status.snr
+        }
+
 
         /**
 
         */
         pub fn read_payload(&mut self, delay: &mut Delay, rx_buf: &mut [u8], max_read: usize) -> usize {
-            let buffer_status = self.radio.get_rx_buffer_status(&mut self.spi_holder, delay).unwrap();
-            let payload_len = buffer_status.payload_length_rx() as usize;
-            let start_offset = buffer_status.rx_start_buffer_pointer();
-            if !(payload_len > 0) {
-                return 0
+            self.radio.clear_irq_status(&mut self.spi_holder, delay, IrqMask::all()).unwrap();
+            let status = self.radio.get_status(&mut self.spi_holder, delay).unwrap();
+
+            match status.command_status() {
+              Some(DataAvailable) => {
+                    let buffer_status = self.radio.get_rx_buffer_status(&mut self.spi_holder, delay).unwrap();
+                    let payload_len = buffer_status.payload_length_rx() as usize; // same as getPacketLength
+                    let start_offset = buffer_status.rx_start_buffer_pointer();
+                  println!("good: {}", payload_len);
+                  if payload_len > 0 {
+                        let mut goal: usize = payload_len as usize;
+                        if goal > max_read { goal = max_read; }
+                        self.radio.read_buffer(
+                            &mut self.spi_holder,
+                            delay,
+                            start_offset as u8,
+                            &mut rx_buf[..goal]).unwrap();
+                        return goal;
+                    }
+                },
+                _ => {
+                    //println!("other: {:?}", other);
+                    // self.radio.clear_irq_status(&mut self.spi_holder, delay, IrqMask::all()).unwrap();
+                    // self.configure_for_receive(delay,2000);
+                }
             }
-
-            //println!("read_all {}, {}: \"", start_offset, payload_len).unwrap();
-            // Read the received message in chunks of 32 bytes
-            let mut goal: usize = payload_len as usize;
-            if goal > max_read  { goal = max_read;}
-            self.radio.read_buffer(
-                &mut self.spi_holder,
-                delay,
-                start_offset as u8,
-                &mut rx_buf[..goal]).unwrap();
-
-
-            // let mut out_offset: usize = 0;
-            //
-            // for i in (0..goal).step_by(32) {
-            //     let to_read = (goal - out_offset) % 32;
-            //     self.radio.read_buffer(
-            //         &mut self.spi_holder,
-            //         delay,
-            //         (i + start_offset) as u8,
-            //         &mut rx_buf[out_offset..out_offset+to_read]
-            //         // &mut rx_buf[i..i+32] // TODO wrong at sub-chunk (32) size
-            //     ).unwrap();
-            //     out_offset += 32;
-            // }
-            goal
-
-            // let mut chunk = [0u8; 32];
-            // for i in (0..goal).step_by(chunk.len()) {
-            //     let end = (goal - i).min(chunk.len()) ;
-            //     self.radio.read_buffer(&mut self.spi_holder,
-            //                            delay,
-            //                            (i + start_offset) as u8,
-            //                            &mut chunk[..end])
-            //         .unwrap();
-            // }
-
+            0
         }
     }
 
@@ -568,37 +651,41 @@ pub mod lora_utils {
         };
 
         let mod_params = LoraModParams::default()
-            .set_spread_factor(SF10) // 10
-            .set_bandwidth(BW125) // BW250) // 250 kHz
-            // .set_coding_rate(CR4_6) // 6 ?? : Sets LoRa coding rate denominator
+            .set_spread_factor(SF10) // 10 / 0x0A
+            .set_bandwidth(BW250)  // 250 kHz
+            .set_coding_rate(CR4_6) // 6 ?? : Sets LoRa coding rate denominator. Actual CR ends up being 2
             .into();
 
         let tx_params = TxParams::default()
             .set_power_dbm(14)
             .set_ramp_time(RampTime::Ramp200u);
         let pa_config = PaConfig::default()
-            .set_device_sel(SX1262)
+            .set_device_sel(SX1261)
             .set_pa_duty_cycle(0x04);
 
         let dio1_irq_mask = IrqMask::none()
-            // .combine(TxDone)
-            // .combine(Timeout)
+            .combine(TxDone)
+            .combine(Timeout)
             .combine(RxDone);
 
+
         let packet_params = LoRaPacketParams::default()
-            // .set_preamble_len(15) // match Arduino unit test example
-            .set_payload_len(64)
-            // .set_header_type(LoRaHeaderType::FixedLen)
+            .set_preamble_len(15) // match Arduino unit test example
+            // .set_payload_len(128)
+            .set_header_type(LoRaHeaderType::FixedLen)
+            .set_crc_type(LoRaCrcType::CrcOff)
             .into();
 
-        const F_XTAL: u32 = 32_000_000; // 32MHz
+        const F_XTAL: u32 = 32_000_000; // 32MHz -- comes from SX126x data sheet FXOSC
         const RF_FREQUENCY: u32 = 433_000_000; // 433 MHz
-        let rf_freq = sx126x::calc_rf_freq(433 as f32, F_XTAL as f32);
+        // const RF_FREQUENCY: u32 = 868_000_000; // 868 MHz
+        let rf_freq = sx126x::calc_rf_freq(RF_FREQUENCY as f32, F_XTAL as f32);
+        println!("rf_freq: {}", rf_freq);
 
         LoRaConfig {
             packet_type: PacketType::LoRa,
             sync_word: 0xAB, //0x1424, // Private networks // Arduino unit test example uses 0xAB,
-            calib_param: CalibParam::from(0x7F),
+            calib_param: CalibParam::from(0x7F), //calibrate All
             mod_params,
             tx_params,
             pa_config,
@@ -610,4 +697,19 @@ pub mod lora_utils {
             rf_freq,
         }
     }
+
+
+
+    // pub(crate) struct Dio1PinRefMut<'dio1>(pub &'dio1 mut Dio1PinType);
+
+    // impl<'dio1> crate::hal::gpio::InputPin for Dio1PinRefMut<'dio1> {
+    //     type Error = core::convert::Infallible;
+    //     fn is_high(&self) -> Result<bool, Self::Error> {
+    //         self.0.is_high()
+    //     }
+    //     fn is_low(&self) -> Result<bool, Self::Error> {
+    //         self.0.is_low()
+    //     }
+    // }
+
 }

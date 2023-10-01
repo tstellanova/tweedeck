@@ -22,7 +22,7 @@ use tweedeck::{Board, LILYGO_KB_I2C_ADDRESS};
 
 #[entry]
 fn main() -> ! {
-    let mut board = Board::new();
+    let mut board = Board::default();
 
     board.timer0.start(50u64.millis());
     loop {

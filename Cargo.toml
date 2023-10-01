@@ -8,10 +8,12 @@ license = "BSD3"
 
 
 [dependencies]
+embedded-hal = { version = "0.2.7" }
 esp32s3-hal = { version = "0.12.0" }
 esp-backtrace = { version = "0.7.0", features = ["esp32s3", "panic-handler", "exception-handler", "print-uart"] }
 esp-println = { version = "0.5.0", features = ["esp32s3"] }
 #esp-alloc = { version = "0.3.0" }
+critical-section = "1.1.2"
 mipidsi = {version="0.7.1", optional=true}
 embedded-graphics = {version="0.8.1", optional=true}
 display-interface = {version="0.4.1", optional=true}

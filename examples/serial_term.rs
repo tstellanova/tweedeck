@@ -84,7 +84,7 @@ fn update_cursor_position( x_idx: &mut u32, y_idx: &mut u32, max_x_idx: u32, max
 
 #[entry]
 fn main() -> ! {
-    let mut board = Board::new();
+    let mut board = Board::default();
 
     //setup a log file
     #[cfg(feature = "sdcard")]
@@ -215,11 +215,6 @@ fn main() -> ! {
             }
         }
 
-        #[cfg(feature = "lorawan")]
-        {
-            board.lora.configure_for_receive(&mut board.delay, 3000);
-           // lora.set_rx(spi1, delay, rx_timeout).unwrap();
-        }
 
         if 0 == action_count {
             block!(board.timer0.wait()).unwrap();

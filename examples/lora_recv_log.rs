@@ -32,7 +32,7 @@ use tweedeck::sdcard_utils::{self};
 
 #[entry]
 fn main() -> ! {
-    let mut board = Board::new();
+    let mut board = Board::default();
     println!("board setup done");
 
     //setup a log file
@@ -47,13 +47,22 @@ fn main() -> ! {
         };
 
 
-    //create a reusable 50 ms timer
-    board.timer0.start(50u64.millis());
+    //create a reusable timer
+    board.timer0.start(100u64.millis());
 
     #[cfg(feature = "lorawan")]
     {
+        board.delay.delay_ms(255u8);
         println!("configure_for_receive");
-        board.lora.configure_for_receive(&mut board.delay, 3000);
+        board.lora.configure_for_receive(&mut board.delay);
+        board.delay.delay_ms(255u8);
+
+        // println!("send_test_tx");
+        // board.lora.send_test_tx(&mut board.delay);
+        // board.delay.delay_ms(255u8);
+        //
+        // board.lora.configure_for_receive(&mut board.delay);
+        // board.delay.delay_ms(255u8);
     }
 
     loop {
@@ -63,23 +72,25 @@ fn main() -> ! {
 
         #[cfg(feature = "lorawan")]
         {
-            // println!("check rx");
-            // let avail = board.lora.rx_bytes_avail(&mut board.delay);
-            // if (avail > 0) {
-            //     println!("avail: {}", avail);
-            //     action_count += 1;
-            // }
-            //if avail > 0 {
-            let recvd = board.lora.read_payload(&mut board.delay, &mut rbuf, RBUF_SIZE);
-            if recvd > 0 {
-                action_count += 1;
-                println!("recvd: [{}]  {:?} \r\n", recvd,  &rbuf[..recvd+1]); //core::str::from_utf8(&rbuf).unwrap());
+            // let snr = board.lora.get_snr(&mut board.delay);
+            // println!("snr: {}", snr);
+
+            let avail = board.lora.rx_bytes_avail(&mut board.delay);
+            if (avail > 0) {
+                println!("avail: {}", avail);
+                // action_count += 1;
             }
-            //}
+
+            // let recvd = board.lora.read_payload(&mut board.delay, &mut rbuf, RBUF_SIZE);
+            // if recvd > 0 {
+            //     action_count += 1;
+            //     println!("recvd: [{}]  {:?} \r\n", recvd,  &rbuf[..recvd+1]); //core::str::from_utf8(&rbuf).unwrap());
+            // }
         }
 
         if 0 == action_count {
-            block!(board.timer0.wait()).unwrap();
+            board.delay.delay_ms(255u8);
+            // block!(board.timer0.wait()).unwrap();
         }
 
         // on exit or whatever:
